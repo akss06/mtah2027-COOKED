@@ -1,5 +1,8 @@
 # More than a Hack 2027 — Phase 1: Ball Possession
 
+> **Our submission lives in [solution/](solution/README.md)** — approach and how to reproduce it.
+> Everything else in this repository is the organisers' starter kit, kept unchanged.
+
 **Organised by [Metrica Sports](https://metrica-sports.com), [FC Barcelona](https://www.fcbarcelona.com)
 and the [Mobile World Capital Barcelona](https://www.mwcbarcelona.com)**, at the Talent Arena in Barcelona.
 
