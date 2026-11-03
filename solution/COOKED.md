@@ -7,9 +7,9 @@
 For every frame we compute about 50 features from the tracked player and ball positions, a
 gradient-boosted classifier turns them into P(home), P(away), P(dead), and a three-state Viterbi
 decoder turns those per-frame probabilities into whole possessions. The classifier is trained only
-on **other matches** — PFF FC's 64 World Cup 2022 matches and Metrica Sports' two public sample
-games — with labels derived by code from their event data. Nothing is fitted or selected on the
-competition match's ground truth.
+on **other matches**: the 7 matches of the IDSSE open dataset (official Bundesliga tracking with
+per-frame ball-status and possession flags) and Metrica Sports' two public sample games. Nothing
+is fitted, tuned or selected on the competition match's ground truth or video.
 
 ## 2. Why this design
 
@@ -25,61 +25,52 @@ other team is sustained.
 
 Per-frame evidence comes from a classifier rather than from "who is nearest the ball" alone,
 because the ball is missing on 41% of graded frames. On those frames the nearest-player rule has
-no answer, but player speed and team shape still carry signal: the team in possession spreads out
-and pushes up, the other compacts, and everyone slows down during a stoppage.
+no answer, but player speed, team shape and where the ball was last and next seen still carry
+signal.
 
-The competition tracker is different from every tracker we can train on, so the training data was
-chosen for how well a model **generalises to a tracker it has not seen** (section 7).
+The competition tracker is different from every tracker we can train on, so choices were made on
+how well a model does on **matches and trackers it has not seen** (sections 6 and 7).
 
 ## 3. Assets
 
 | asset | used? | how |
 |---|---|---|
 | Tactical ATD (tracking) | **yes** | the only input to the pipeline |
-| Smart Tagging | analysis only | set-piece times were used to diagnose where stoppages are missed (section 7); not an input |
-| Homography | no | the ATD is already in pitch coordinates; nothing needed pixels |
-| Broadcast ATD and video | no | not frame-aligned to the tactical video; nothing gained over tactical ATD yet |
-| Tactical video | no | — |
+| Smart Tagging | automatic checks only | set-piece times were used in automatic diagnostics of where stoppages are missed; not an input |
+| Homography | no | the ATD is already in pitch coordinates |
+| Broadcast ATD and video | no | not frame-aligned to the tactical video |
+| Tactical video | understanding only | watched to understand what counts as a stoppage; not an input |
 | Public 5-minute ground truth | pipeline check only | confirming frames are aligned and labels mean what we think; never used to choose anything |
 
 ## 4. Training data
 
-| dataset | source | who labelled it | amount |
-|---|---|---|---|
-| PFF FC 2022 World Cup | PFF FC, free on request | PFF's event data; per-frame labels derived by our code | 64 matches, ~9.5 million frames at 25 fps |
-| Metrica Sports sample games 1 and 2 | <https://github.com/metrica-sports/sample-data> (public) | Metrica's event data; per-frame labels derived by our code | 2 matches, ~286,000 frames |
+| dataset | source | licence | who labelled it | amount |
+|---|---|---|---|---|
+| IDSSE open data: 7 matches, Bundesliga / 2. Bundesliga 2022/23 | Bassek, M. et al. (2025). *An integrated dataset of spatiotemporal and event data in elite soccer.* Scientific Data 12, 195. <https://doi.org/10.1038/s41597-025-04505-y> (data owner DFL; tracking by Sportec Solutions) | CC BY 4.0 | DFL's official `BallStatus` and `BallPossession` flags in the position data | 7 matches, ~1.02 million frames at 25 fps |
+| Metrica Sports sample games 1 and 2 | <https://github.com/metrica-sports/sample-data> | public sample data | Metrica's event data; per-frame labels derived by our code | 2 matches, ~286,000 frames |
 
 No data about the competition match other than the provided bundle is used. No human decided any
-per-frame label: every label comes from the providers' event logs through fixed rules.
+per-frame label.
 
-### Labels from events
+### Labels
 
-The same rule for both sources ([pff_games.py](pff_games.py), [sample_games.py](sample_games.py)):
-
-- **Live frames** belong to the team that owns the ball at the most recent on-the-ball event.
-  For PFF this is the possession-sequence owner (`home_ball`). For Metrica it is the team of the
-  last pass, set piece, shot, recovery, ball lost or ball out. **Challenges are skipped**: both
-  teams appear in them, and a challenge alone is not a change of possession (CHALLENGE.md: "a simple
-  touch of the ball without control" does not count). A loose ball therefore stays with the last
-  team that controlled it, as CHALLENGE.md specifies.
-- **Dead frames** run from the end of the last event before a restart (kick-off, throw-in, goal
-  kick, corner, free kick) to the start of that restart.
-- Frames outside each period's first-to-last event are not graded.
-
-Sanity of the result: a PFF match has a median of 271 possessions and 35% dead time; a Metrica
-sample match about 370 possessions and 33% dead time.
+- **IDSSE** ([idsse_games.py](idsse_games.py)): straight from the ball's per-frame flags in the
+  official position data. `BallStatus = 0` → `D`; otherwise `BallPossession` 1 → `H`, 2 → `A`.
+  This is the same kind of source as the competition ground truth, which comes from corrected
+  tracking's dead-ball flag and owner. As in the public ground truth, the owner can change on a
+  single touch: the median IDSSE possession lasts 3.8 s, and 41–52% of frames are dead.
+- **Metrica** ([sample_games.py](sample_games.py)): live frames belong to the team of the most
+  recent pass, set piece, shot, recovery, ball lost or ball out. Challenges are skipped, so a
+  loose ball stays with the last team that had it. Dead frames run from the end of the last event
+  before a restart to the restart itself.
 
 ### Matching the competition tracker
 
-- **PFF** is broadcast tracking at 29.97 fps, resampled to 25 fps by nearest video time. Its ball
-  is genuinely visible on a median 41% of frames, close to the competition tracker, so it is used
-  as is. Only the raw `VISIBLE` ball is used; `ESTIMATED` balls count as missing. Players include
-  the tracker's own estimates for off-screen players, which is closer to the competition's
-  full-pitch view than dropping them. **PFF's "smoothed" positions are never used**: PFF builds them
-  from its event data, so they would leak the labels into the features.
-- **Metrica's** ball is tracked on ~87% of live play. Each game is used as recorded and again with
-  the ball hidden in random 0.5–4 s gaps covering 40% of live play.
-- Every match is also used with home and away swapped, so the model cannot learn a team bias.
+Both sources track the ball almost always; the competition tracker loses it on 41% of graded
+frames, and on about 73% of the seconds before a tagged restart (aggregates of the provided input
+data, not of any labels). Each match is therefore used twice: as recorded, and with the ball hidden
+in random 0.5–4 s gaps on 25% of live and 70% of dead frames, which matches that overall rate.
+Every copy is also used with home and away swapped, so the model cannot learn a team bias.
 
 ## 5. Features
 
@@ -96,15 +87,16 @@ oriented to attack +x, using the side its players stand on on average in that ha
   seen, and how far its last seen position is from the touchline and goal line.
 - **Across ball gaps:** each team's distance to the ball at the last and the next frame the ball
   is seen, and its mean over the 2 s before and the 2 s after the frame. These carry possession
-  through the 41% of frames without a ball, and a hand-over shows up as "close before, far after".
+  through the frames without a ball, and a hand-over shows up as "close before, far after".
 - 1 s and 5 s centred rolling means of the speed, shape, velocity and ball-visibility features;
   10 s means of speed and ball visibility.
+
+Using frames after the one being labelled is allowed: the task is post-match.
 
 ## 6. Model and decoding
 
 - **Classifier:** scikit-learn `HistGradientBoostingClassifier` (300 iterations, learning rate
-  0.05, fixed seed), trained on every 10th PFF frame and every 5th Metrica frame — neighbours are
-  near-duplicates.
+  0.05, fixed seed), trained on every 5th frame — neighbours are near-duplicates.
 - **Emissions:** the classifier's P(state | features) divided by the class prior (a scaled
   likelihood), then divided by a *temper* factor. Neighbouring frames are nearly copies of each
   other, so treating each as independent evidence overcounts it and makes the decoder flip on short
@@ -112,39 +104,42 @@ oriented to attack +x, using the side its players stand on on average in that ha
 - **Transitions:** counted per frame from the training labels.
 - **Decoding:** Viterbi over H / A / D separately in each half; frames outside the halves are `X`.
 
-**The one free setting, temper, is chosen on 11 PFF matches held out from training** (every sixth
-by id). spellF1 was computed with the organisers' own `possession_metrics.py`:
+**The one free setting, temper, is chosen leave-one-match-out** over the 9 training matches: each
+match, with its ball hidden as above, is scored by a model trained on the other 8. spellF1 is
+computed with the organisers' own `possession_metrics.py`:
 
-| temper | 1 | **2** | 4 | 8 | 16 | 32 | 64 |
-|---|---|---|---|---|---|---|---|
-| mean held-out spellF1 | 0.565 | **0.574** | 0.564 | 0.540 | 0.492 | 0.402 | 0.301 |
+| temper | 1 | **2** | 4 | 8 | 16 |
+|---|---|---|---|---|---|
+| mean held-out spellF1 | 0.556 | **0.558** | 0.544 | 0.512 | 0.448 |
+| worst held-out match | 0.494 | 0.476 | 0.460 | 0.437 | 0.346 |
 
-The final model is then retrained on all 64 PFF matches plus both Metrica games.
+Per held-out match at temper 2: IDSSE 0.476–0.609, Metrica 0.643 and 0.641. The final model is
+then trained on all 9 matches.
 
 ## 7. What we tried and dropped
 
-### Choice of training data
+### Training data
 
-We first trained on Metrica's two games only, then on PFF only, then on both. Each was tested on
-matches it had not trained on, at temper 2:
+We first trained on Metrica alone, then added PFF FC's 64 World Cup 2022 matches (free on request,
+broadcast tracking plus event data), which helped a lot. PFF's terms of use, however, restrict its
+data to personal, non-commercial use and prohibit using it to train machine-learning models, so we
+dropped it and replaced it with IDSSE, which is CC BY 4.0. On exactly the same held-out cases (ball
+hidden as in section 4, temper 2):
 
-| trained on | test: Metrica 1 | test: Metrica 2 | test: held-out PFF | worst |
-|---|---|---|---|---|
-| Metrica only | 0.582* | 0.568* | 0.427 | 0.427 |
-| PFF only | 0.463 | 0.513 | 0.552 | 0.463 |
-| **PFF + Metrica** | **0.516**† | **0.516**† | **0.550** | **0.516** |
+| trained on | 7 IDSSE matches (mean) | Metrica 1 | Metrica 2 | mean | worst |
+|---|---|---|---|---|---|
+| PFF (64) + Metrica | 0.472 | 0.599 | 0.619 | 0.502 | 0.417 |
+| **IDSSE + Metrica** (submitted) | **0.534** | **0.643** | **0.641** | **0.558** | **0.476** |
 
-\* trained on the other Metrica game: same tracking provider. † trained on PFF plus the other
-Metrica game.
+For each Metrica test game both models were trained without it but with the other Metrica game,
+so those two columns are the fairest comparison. The IDSSE column favours the IDSSE model, which
+had the other six IDSSE matches in training. We believe the gain also comes from the labels:
+IDSSE's per-frame official flags are closer to how the competition ground truth is defined than
+labels reconstructed from event logs.
 
-Every model loses accuracy on a tracker it has not seen. The competition tracker is unseen by all
-of them, so we chose on the worst case, where training on both is clearly best, at almost no cost
-on PFF. (This table predates the "across ball gaps" features of section 5.)
+### Features and decoder (measured with PFF + Metrica training, before the switch)
 
-### Features and decoder
-
-On the same 13 held-out cases (11 PFF, Metrica 1 and 2 under leave-one-Metrica-out, Metrica ball
-hidden on 40% of live play), temper 2:
+On 13 held-out cases (11 PFF matches, Metrica 1 and 2 under leave-one-Metrica-out), temper 2:
 
 | change | held-out PFF | Metrica 1 | Metrica 2 | worst |
 |---|---|---|---|---|
@@ -153,69 +148,61 @@ hidden on 40% of live play), temper 2:
 | **"across ball gaps" features** (adopted) | **0.574** | **0.559** | **0.535** | **0.535** |
 | + restart features: each team's speed over the 2 s before and after, ball speed and its peak over the next 1 s | 0.574 | 0.570 | 0.555 | 0.555 |
 
-The decoder change is within noise and was dropped; the "across ball gaps" features were adopted.
-The restart features were dropped as well. They were aimed at short bursts of play between two
-stoppages (a corner, a few seconds of play, a goal kick), which the model often merges into one
-stoppage: 43% of live stretches under 5 s between two stoppages are swallowed whole. They did
-not change that (44% after), the gain came from the two Metrica games only, and +0.02 is at the
-edge of noise, so we did not keep the extra complexity. A diagnosis on the
-same cases explains why: the model found 2,900 possessions where the truth has 3,946, mostly
-missing short ones (16% of true possessions last under 2 s), and split stoppages into too many
-pieces (1,465 dead spells against 1,211). Re-weighting the decoder cannot recover evidence the
-classifier never had; features that carry the ball across gaps can. With them, dead spells drop
-to 1,278.
+A diagnosis on the same cases explains the pattern. The model found 2,900 possessions where the
+truth has 3,946, mostly missing short ones (16% of true possessions last under 2 s), and split
+stoppages into too many pieces (1,465 dead spells against 1,211). Re-weighting the decoder cannot
+recover evidence the classifier never had, so that change (+0.01, inside noise) was dropped.
+Features that carry the ball across gaps can; with them, dead spells drop to 1,278.
+
+The restart features were aimed at short bursts of play between two stoppages (a corner, a few
+seconds of play, a goal kick), which the model often merges into one stoppage: 43% of live
+stretches under 5 s between two stoppages were swallowed whole. They did not change that (44%
+after), their gain came from the two Metrica games only, and +0.02 is at the edge of noise. We
+dropped them rather than risk fitting two matches.
 
 ### Other ideas
 
 | idea | result | why dropped |
 |---|---|---|
-| Nearest-player HMM with hand-set probabilities | 996 possessions on BAR-ATH, heavy flicker | probabilities were guesses; replaced by values counted from labelled matches |
+| Nearest-player HMM with hand-set probabilities | 996 possessions on BAR-ATH, heavy flicker | probabilities were guesses; replaced by values learned from labelled matches |
 | Nearest-player HMM, missing-ball rate fitted by EM on BAR-ATH | EM collapsed to "ball missing = dead ball" | not identifiable from one observation; replaced by the feature classifier |
-| Separate ball-blind "is play stopped?" model (Metrica training) | held-out spellF1 0.575 → 0.526; no change in stoppages detected on BAR-ATH | did not help |
-| Training with a still ball placed at each restart spot, plus a ball-speed feature (Metrica training) | no change on BAR-ATH | did not help |
+| Separate ball-blind "is play stopped?" model (Metrica training) | held-out spellF1 0.575 → 0.526 | did not help |
+| Training with a still ball placed at each restart spot, plus a ball-speed feature (Metrica training) | no change | did not help |
 
-The last two came from a diagnostic. Using Smart Tagging set-piece times as an independent,
-automatic reference, the Metrica-only model detected corners, free kicks and kick-offs after goals
-as stoppages almost every time, but missed some goal kicks and throw-ins. In those windows the
-tracking looks exactly like live play: the ball is visible and moving at ~4.5 m/s, and players run
-at ~2 m/s. Training on PFF raised the share of pre-restart frames called dead from 65% to 73%,
-and for goal kicks from 25% to 46%.
+An automatic diagnostic using Smart Tagging set-piece times showed that some goal kicks and
+throw-ins look exactly like live play in the tracking: the ball is visible and moving at ~4.5 m/s,
+and players run at ~2 m/s. The tracking alone cannot separate those.
 
 ## 8. Result
 
-On BAR-ATH the submission reports 228 possessions with a mean of 17 s, and calls 39% of
-graded-half frames dead. That is somewhat higher than the 33–35% typical of the training matches,
-but within PFF's range of 24–46%.
+On BAR-ATH the submission reports 307 possessions with a mean of 12 s, and calls 43% of
+graded-half frames dead, in line with the 41–52% of the IDSSE matches.
 
 Pipeline check on the public 5 minutes (17 possessions — a sanity check, not a measurement; one
 possession moves spellF1 by ~0.06):
 
 | | spellF1 | macroF1 | possessions (truth 17) |
 |---|---|---|---|
-| **ours** | **0.587** | **0.788** | 13 |
-| ours before the "across ball gaps" features | 0.607 | 0.833 | 12 |
+| **ours** | **0.552** | **0.818** | 12 |
 | baseline_smooth125 | 0.424 | 0.581 | 16 |
 | baseline_smooth50 (the published floor's setting) | 0.326 | 0.621 | 26 |
 
 ## 9. Limitations
 
-- **Domain gap.** Neither training source uses the competition tracker. PFF is broadcast tracking
-  with most players estimated off-screen; Metrica's sample is clean tracking with the ball removed
-  during stoppages. The worst-case test in section 7 is our best estimate of how much that costs.
-- **Short stoppages.** Quick throw-ins and goal kicks whose tracking looks like live play can be
-  labelled as possession.
-- **Short possessions are under-found.** About 16% of true possessions in the held-out matches
-  last under 2 s; our output has about 3%. Short bursts of play between two stoppages are often
-  merged into one stoppage (section 7).
-- **Possibly too many dead-ball frames** on BAR-ATH (section 8). It may also be a real feature of
-  this match; we have no way to check without using the ground truth.
-- **Event-derived labels are an approximation** of the corrected-tracking definition used for the
-  ground truth, especially around loose balls and the exact frame play stops and restarts.
+- **Domain gap.** Neither training source uses the competition tracker; ball loss is simulated by
+  hiding the ball at the competition tracker's overall rate, which only approximates where and
+  when it really loses the ball.
+- **Small training set.** 9 matches; the worst held-out match scores 0.48 against a mean of 0.56.
+- **Short stoppages and short bursts.** Quick throw-ins and goal kicks whose tracking looks like
+  live play can be labelled as possession, and a few seconds of play between two stoppages can be
+  merged into one stoppage.
+- **Long breaks.** During a drinks break, players kicking balls around can look like live play.
+- **Metrica's labels are event-derived**, an approximation of the corrected-tracking definition.
 - **No player identities** are used; everything is team-level, as the ATD provides.
 
 ## 10. Reproduction
 
 See [README.md](README.md). In short: Python 3.13, `pip install -r solution/requirements.txt`,
-get the Metrica sample data and the PFF dataset, set `MTAH_DATA_DIR`, run
-`python solution/pff_games.py` once (~15 min), then `python solution/run.py` (~10–17 min). Two
-runs produce byte-identical files.
+get the Metrica sample data and the IDSSE files, set `MTAH_DATA_DIR`, run
+`python solution/idsse_games.py` once (~30 s), then `python solution/run.py` (~16 min). Two runs
+produce byte-identical files.

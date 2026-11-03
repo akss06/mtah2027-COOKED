@@ -1,16 +1,18 @@
-"""Train on PFF FC's 2022 World Cup matches, then label the competition match.
+"""Train on IDSSE open data + Metrica's sample games, then label the competition match.
 
-    python solution/pff_games.py     # once: converts the PFF matches into a cache (~15 min)
+    python solution/idsse_games.py   # once: converts the IDSSE matches into a cache (~30 s)
     python solution/run.py           # writes evaluation/results/hmm.csv
 
-1. Features per frame (features.py): ball vs players, player speed, team shape, ball near a line.
+1. Features per frame (features.py): ball vs players, player speed, team shape, ball context.
 2. A gradient-boosted classifier turns them into P(H), P(A), P(D) per frame. It is trained on
-   PFF's 64 World Cup matches plus Metrica's two public sample games, each also with home and
-   away swapped -- never on the competition match.
+   other matches only -- the 7 IDSSE matches and Metrica's 2 sample games -- each as recorded and
+   as a copy whose ball is hidden as often as the competition tracker loses it, and each with home
+   and away swapped.
 3. The Viterbi judge (hmm.py) turns those per-frame probabilities into whole possessions.
 
-The one free knob, `temper`, is chosen on PFF matches held out from training; the final model is
-then retrained on every match. The competition ground truth is never used for any choice.
+The one free knob, `temper`, is chosen leave-one-match-out over those 9 matches: each is scored by
+a model trained on the other 8. The final model is then trained on all 9. The competition ground
+truth is never used for any choice.
 """
 
 import os
@@ -24,17 +26,19 @@ ROOT = os.path.dirname(HERE)
 sys.path[:0] = [ROOT, os.path.join(ROOT, "starter"), os.path.join(ROOT, "evaluation")]
 import features  # noqa: E402
 import hmm  # noqa: E402
-import pff_games  # noqa: E402
+import idsse_games  # noqa: E402
 import possession_metrics as pm  # noqa: E402
 import sample_games  # noqa: E402
 from baseline import RESULTS_DIR, team_of_each_track, write_submission  # noqa: E402
 from games import GAME, GAMES, half_video_blocks, require  # noqa: E402
 
-TEMPERS = (1, 2, 4, 8, 16, 32, 64)
-HOLDOUT_EVERY = 6  # every 6th PFF match (by id) is held out to choose temper
-TRAIN_STEP = 10  # neighbouring frames are near-duplicates; every 10th is plenty to train on
-METRICA_STEP = 5  # two Metrica games against 64 PFF ones: sample them more densely
-MASK_FRACTION = 0.4  # share of Metrica's live play whose ball is hidden in the masked copy
+TEMPERS = (1, 2, 4, 8, 16)
+TRAIN_STEP = 5  # neighbouring frames are near-duplicates; every 5th is plenty to train on
+# The training matches track the ball almost always. The competition tracker loses it on 41% of
+# graded frames, and on ~73% of the seconds before a restart (both aggregates of its input data,
+# not of any labels). Hiding it on 25% of live and 70% of dead frames matches that overall rate.
+ALIVE_MISSING = 0.25
+DEAD_MISSING = 0.70
 SEED = 0
 SWAP_LABEL = {"H": "A", "A": "H", "D": "D", "X": "X"}
 
@@ -46,37 +50,53 @@ def labelled_blocks(labels: np.ndarray) -> list:
     return [(a, b - 1) for a, b in zip(edges[0::2], edges[1::2])]
 
 
-def train(pff_ids: list) -> tuple:
-    """(classifier, class prior, transitions) from the given PFF matches plus both Metrica games.
-
-    Metrica's sample games are used as recorded and with the ball hidden on 40% of live play, as
-    their ball is tracked far more often than the competition tracker's. PFF's broadcast tracking
-    already loses the ball about as often, so it is used as is.
-    """
-    rng = np.random.default_rng(SEED)
-    matches = []
-    for game in pff_ids:
-        track, labels, pitch = pff_games.load(game)
-        matches.append((track, labels, pitch, TRAIN_STEP))
+def training_matches() -> list:
+    """[(name, track, labels, pitch)] for every external match used."""
+    out = [("idsse_" + m, *idsse_games.load(m)) for m in idsse_games.match_ids()]
     for game in (1, 2):
         track, labels = sample_games.load(game)
-        masked = features.mask_ball(track, labels, MASK_FRACTION, rng)
-        matches += [(track, labels, sample_games.PITCH, METRICA_STEP),
-                    (masked, labels, sample_games.PITCH, METRICA_STEP)]
+        out.append(("metrica_%d" % game, track, labels, sample_games.PITCH))
+    return out
 
-    rows, targets, transitions = [], [], []
-    for track, labels, pitch, step in matches:
-        frame = features.build(track, labelled_blocks(labels), pitch).iloc[::step]
-        y = labels[frame.index]
-        rows += [frame.to_numpy(), features.swap_teams(frame).to_numpy()]
-        targets += [y, np.array([SWAP_LABEL[v] for v in y])]
-        transitions.append(np.append(labels, "X"))
 
-    x, y = np.vstack(rows), np.concatenate(targets)
+def degrade(track: dict, labels: np.ndarray, rng: np.random.Generator) -> dict:
+    """Hide the ball as often as the competition tracker loses it."""
+    track = features.mask_ball(track, labels, ALIVE_MISSING, rng, ("H", "A"))
+    return features.mask_ball(track, labels, DEAD_MISSING, rng, ("D",))
+
+
+def prepare(matches: list) -> list:
+    """Per match: training rows (as recorded + degraded, both team orders) and held-out features.
+
+    Built once and reused by every leave-one-out fold. Each match gets its own seed, so the
+    degraded copy does not depend on which other matches are loaded.
+    """
+    prepared = []
+    for i, (name, track, labels, pitch) in enumerate(matches):
+        blocks = labelled_blocks(labels)
+        degraded = degrade(track, labels, np.random.default_rng(SEED + i))
+        held_out = features.build(degraded, blocks, pitch)
+        rows, targets = [], []
+        for frame in (features.build(track, blocks, pitch), held_out):
+            frame = frame.iloc[::TRAIN_STEP]
+            y = labels[frame.index]
+            rows += [frame.to_numpy(), features.swap_teams(frame).to_numpy()]
+            targets += [y, np.array([SWAP_LABEL[v] for v in y])]
+        prepared.append({"name": name, "labels": labels, "blocks": blocks, "held_out": held_out,
+                         "x": np.vstack(rows), "y": np.concatenate(targets)})
+        print("  prepared {}".format(name), flush=True)
+    return prepared
+
+
+def train(prepared: list) -> tuple:
+    """(classifier, class prior, transitions) from prepared matches."""
+    x = np.vstack([p["x"] for p in prepared])
+    y = np.concatenate([p["y"] for p in prepared])
     model = HistGradientBoostingClassifier(max_iter=300, learning_rate=0.05,
                                            random_state=SEED).fit(x, y)
     prior = np.array([np.mean(y == s) for s in hmm.STATES])
-    return model, prior, hmm.count_transitions(np.concatenate(transitions))
+    trans = hmm.count_transitions(np.concatenate([np.append(p["labels"], "X") for p in prepared]))
+    return model, prior, trans
 
 
 def log_likelihoods(model, prior: np.ndarray, frame) -> np.ndarray:
@@ -100,37 +120,39 @@ def spell_f1(truth: np.ndarray, predicted: np.ndarray) -> float:
     return pm.evaluate(pm.label_codes(truth), pm.label_codes(predicted))["spell_f1_mean"]
 
 
-def evidence(model, prior: np.ndarray, track: dict, labels: np.ndarray, pitch: tuple) -> tuple:
-    """Everything decode needs for one labelled match, computed once and reused per temper."""
-    blocks = labelled_blocks(labels)
-    frame = features.build(track, blocks, pitch)
-    return log_likelihoods(model, prior, frame), frame.index.to_numpy(), blocks, labels
+def choose_temper(prepared: list) -> float:
+    """Leave-one-match-out: each match scored by a model trained on all the others."""
+    scores = {t: [] for t in TEMPERS}
+    for i, held in enumerate(prepared):
+        model, prior, trans = train(prepared[:i] + prepared[i + 1:])
+        ll = log_likelihoods(model, prior, held["held_out"])
+        index = held["held_out"].index.to_numpy()
+        row = []
+        for temper in TEMPERS:
+            score = spell_f1(held["labels"], decode(ll, index, held["blocks"], len(held["labels"]),
+                                                    trans, temper))
+            scores[temper].append(score)
+            row.append(score)
+        print("  {:<14} ".format(held["name"]) + "  ".join("{:.4f}".format(s) for s in row),
+              flush=True)
 
-
-def score(cases: list, trans: np.ndarray, temper: float) -> list:
-    return [spell_f1(truth, decode(ll, index, blocks, len(truth), trans, temper))
-            for ll, index, blocks, truth in cases]
+    print("  {:<14} ".format("mean") + "  ".join("{:.4f}".format(np.mean(scores[t]))
+                                                for t in TEMPERS))
+    print("  {:<14} ".format("worst") + "  ".join("{:.4f}".format(np.min(scores[t]))
+                                                 for t in TEMPERS))
+    best = max(TEMPERS, key=lambda t: np.mean(scores[t]))
+    print("  -> temper {}\n".format(best), flush=True)
+    return best
 
 
 if __name__ == "__main__":
-    games = pff_games.game_ids()
-    holdout = games[::HOLDOUT_EVERY]
-    training = [g for g in games if g not in holdout]
-    print("training on {} PFF matches + 2 Metrica, {} PFF held out".format(len(training), len(holdout)), flush=True)
-    model, prior, trans = train(training)
+    print("preparing external matches", flush=True)
+    prepared = prepare(training_matches())
+    print("\nleave-one-match-out spellF1 (ball degraded like the competition tracker)")
+    print("  {:<14} ".format("temper") + "  ".join("{:>6}".format(t) for t in TEMPERS))
+    temper = choose_temper(prepared)
 
-    held = [evidence(model, prior, *pff_games.load(g)) for g in holdout]
-    print("\nspellF1 on held-out PFF matches")
-    best, best_score = None, -1.0
-    for temper in TEMPERS:
-        mean = float(np.mean(score(held, trans, temper)))
-        print("  temper {:>3}   mean {:.4f}".format(temper, mean))
-        if mean > best_score:
-            best, best_score = temper, mean
-    temper = best
-    print("  -> temper {}\n".format(temper), flush=True)
-
-    model, prior, trans = train(games)
+    model, prior, trans = train(prepared)
     meta_path, raw_path = require(["atd_meta", "atd_raw"])
     pitch = GAMES[GAME]["pitch"]
     track = features.parse_metrica_atd(raw_path, team_of_each_track(meta_path), pitch)

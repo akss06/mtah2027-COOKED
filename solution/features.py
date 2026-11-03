@@ -118,19 +118,23 @@ def build(track: dict, blocks: list, pitch: tuple) -> pd.DataFrame:
     return pd.concat(parts)
 
 
-def mask_ball(track: dict, labels: np.ndarray, fraction: float, rng: np.random.Generator) -> dict:
-    """Copy of `track` with the ball hidden on ~`fraction` of live frames, in 0.5-4 s gaps.
+def mask_ball(track: dict, labels: np.ndarray, fraction: float, rng: np.random.Generator,
+              states: tuple = ("H", "A")) -> dict:
+    """Copy of `track` with the ball hidden on ~`fraction` of `states` frames, in 0.5-4 s gaps.
 
-    The sample games' ball is tracked on ~87% of live play; the competition tracker loses it far
-    more often. Training on both versions teaches the model to cope without the ball.
+    The training matches track the ball far more often than the competition tracker does.
+    Training on both versions teaches the model to cope without the ball.
     """
     ball = track["ball"].copy()
-    alive = np.flatnonzero(np.isin(labels, ["H", "A"]))
-    target, hidden = int(fraction * len(alive)), 0
+    chosen = np.flatnonzero(np.isin(labels, states))
+    if not len(chosen):
+        return {**track, "ball": ball}
+    target = int(fraction * len(chosen))
+    hidden = int(np.sum(np.isnan(ball[chosen, 0])))
     while hidden < target:
-        start = rng.choice(alive)
+        start = rng.choice(chosen)
         gap = slice(start, start + rng.integers(FPS // 2, 4 * FPS))
-        hidden += int(np.sum(~np.isnan(ball[gap, 0]) & np.isin(labels[gap], ["H", "A"])))
+        hidden += int(np.sum(~np.isnan(ball[gap, 0]) & np.isin(labels[gap], states)))
         ball[gap] = np.nan
     return {**track, "ball": ball}
 
