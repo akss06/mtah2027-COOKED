@@ -95,8 +95,9 @@ Using frames after the one being labelled is allowed: the task is post-match.
 
 ## 6. Model and decoding
 
-- **Classifier:** scikit-learn `HistGradientBoostingClassifier` (300 iterations, learning rate
-  0.05, fixed seed), trained on every 5th frame — neighbours are near-duplicates.
+- **Classifier:** scikit-learn `HistGradientBoostingClassifier` (600 iterations, 63 leaves per
+  tree, learning rate 0.05, fixed seed), trained on every 5th frame — neighbours are
+  near-duplicates. The size was chosen leave-one-match-out (section 7).
 - **Emissions:** the classifier's P(state | features) divided by the class prior (a scaled
   likelihood), then divided by a *temper* factor. Neighbouring frames are nearly copies of each
   other, so treating each as independent evidence overcounts it and makes the decoder flip on short
@@ -110,10 +111,10 @@ computed with the organisers' own `possession_metrics.py`:
 
 | temper | 1 | **2** | 4 | 8 | 16 |
 |---|---|---|---|---|---|
-| mean held-out spellF1 | 0.556 | **0.558** | 0.544 | 0.512 | 0.448 |
-| worst held-out match | 0.494 | 0.476 | 0.460 | 0.437 | 0.346 |
+| mean held-out spellF1 | 0.568 | **0.569** | 0.558 | 0.531 | 0.474 |
+| worst held-out match | 0.498 | 0.502 | 0.491 | 0.452 | 0.363 |
 
-Per held-out match at temper 2: IDSSE 0.476–0.609, Metrica 0.643 and 0.641. The final model is
+Per held-out match at temper 2: IDSSE 0.502–0.615, Metrica 0.657 and 0.643. The final model is
 then trained on all 9 matches.
 
 ## 7. What we tried and dropped
@@ -129,13 +130,29 @@ hidden as in section 4, temper 2):
 | trained on | 7 IDSSE matches (mean) | Metrica 1 | Metrica 2 | mean | worst |
 |---|---|---|---|---|---|
 | PFF (64) + Metrica | 0.472 | 0.599 | 0.619 | 0.502 | 0.417 |
-| **IDSSE + Metrica** (submitted) | **0.534** | **0.643** | **0.641** | **0.558** | **0.476** |
+| **IDSSE + Metrica** (kept) | **0.534** | **0.643** | **0.641** | **0.558** | **0.476** |
 
 For each Metrica test game both models were trained without it but with the other Metrica game,
 so those two columns are the fairest comparison. The IDSSE column favours the IDSSE model, which
 had the other six IDSSE matches in training. We believe the gain also comes from the labels:
 IDSSE's per-frame official flags are closer to how the competition ground truth is defined than
-labels reconstructed from event logs.
+labels reconstructed from event logs. (This comparison used the earlier, smaller classifier of
+300 iterations and 31 leaves.)
+
+### Classifier size and decoder (IDSSE + Metrica, leave-one-match-out)
+
+Most errors are short possessions: 29% of true possessions last under 2 s, and the model found
+3% of those under 1 s and 16% of those of 1–2 s. Re-tuning the decoder (temper 1–3 × team-switch
+cost ×1/3/10) left the mean within 0.551–0.560: flat. A larger classifier helped on every match:
+
+| classifier | 7 IDSSE matches (mean) | Metrica 1 | Metrica 2 | mean | worst | training time |
+|---|---|---|---|---|---|---|
+| 300 iterations, 31 leaves | 0.534 | 0.643 | 0.641 | 0.558 | 0.476 | 1× |
+| **600 iterations, 63 leaves** (submitted) | **0.545** | **0.657** | **0.643** | **0.569** | **0.502** | 2× |
+| 1200 iterations, 127 leaves | 0.551 | 0.655 | 0.658 | 0.575 | 0.486 | 7× |
+
+600 / 63 improved 8 of 9 matches and left the ninth unchanged. 1200 / 127 raised the mean by a
+further 0.006, inside noise, but lowered the worst match, so we kept 600 / 63.
 
 ### Features and decoder (measured with PFF + Metrica training, before the switch)
 
@@ -175,7 +192,7 @@ and players run at ~2 m/s. The tracking alone cannot separate those.
 
 ## 8. Result
 
-On BAR-ATH the submission reports 307 possessions with a mean of 12 s, and calls 43% of
+On BAR-ATH the submission reports 333 possessions with a mean of 11 s, and calls 42% of
 graded-half frames dead, in line with the 41–52% of the IDSSE matches.
 
 Pipeline check on the public 5 minutes (17 possessions — a sanity check, not a measurement; one
@@ -183,7 +200,7 @@ possession moves spellF1 by ~0.06):
 
 | | spellF1 | macroF1 | possessions (truth 17) |
 |---|---|---|---|
-| **ours** | **0.552** | **0.818** | 12 |
+| **ours** | **0.710** | **0.823** | 14 |
 | baseline_smooth125 | 0.424 | 0.581 | 16 |
 | baseline_smooth50 (the published floor's setting) | 0.326 | 0.621 | 26 |
 
@@ -192,7 +209,9 @@ possession moves spellF1 by ~0.06):
 - **Domain gap.** Neither training source uses the competition tracker; ball loss is simulated by
   hiding the ball at the competition tracker's overall rate, which only approximates where and
   when it really loses the ball.
-- **Small training set.** 9 matches; the worst held-out match scores 0.48 against a mean of 0.56.
+- **Small training set.** 9 matches; the worst held-out match scores 0.50 against a mean of 0.57.
+- **Short possessions.** A touch or a deflection lasting under 2 s is mostly missed: the features
+  say who is near the ball, not who just touched it.
 - **Short stoppages and short bursts.** Quick throw-ins and goal kicks whose tracking looks like
   live play can be labelled as possession, and a few seconds of play between two stoppages can be
   merged into one stoppage.
@@ -204,5 +223,5 @@ possession moves spellF1 by ~0.06):
 
 See [README.md](README.md). In short: Python 3.13, `pip install -r solution/requirements.txt`,
 get the Metrica sample data and the IDSSE files, set `MTAH_DATA_DIR`, run
-`python solution/idsse_games.py` once (~30 s), then `python solution/run.py` (~16 min). Two runs
+`python solution/idsse_games.py` once (~30 s), then `python solution/run.py` (~35 min). Two runs
 produce byte-identical files.

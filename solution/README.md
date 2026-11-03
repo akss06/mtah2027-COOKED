@@ -45,7 +45,7 @@ Point the scripts at the data:
 
 ```bash
 python solution/idsse_games.py       # once, ~30 s: converts IDSSE to a 25 fps cache
-python solution/run.py               # ~16 min, writes evaluation/results/hmm.csv
+python solution/run.py               # ~35 min, writes evaluation/results/hmm.csv
 python evaluation/validate_submission.py evaluation/results/hmm.csv
 ```
 

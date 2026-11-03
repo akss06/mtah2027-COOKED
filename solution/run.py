@@ -92,7 +92,7 @@ def train(prepared: list) -> tuple:
     """(classifier, class prior, transitions) from prepared matches."""
     x = np.vstack([p["x"] for p in prepared])
     y = np.concatenate([p["y"] for p in prepared])
-    model = HistGradientBoostingClassifier(max_iter=300, learning_rate=0.05,
+    model = HistGradientBoostingClassifier(max_iter=600, max_leaf_nodes=63, learning_rate=0.05,
                                            random_state=SEED).fit(x, y)
     prior = np.array([np.mean(y == s) for s in hmm.STATES])
     trans = hmm.count_transitions(np.concatenate([np.append(p["labels"], "X") for p in prepared]))
