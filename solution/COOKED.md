@@ -185,6 +185,7 @@ dropped them rather than risk fitting two matches.
 | Nearest-player HMM, missing-ball rate fitted by EM on BAR-ATH | EM collapsed to "ball missing = dead ball" | not identifiable from one observation; replaced by the feature classifier |
 | Separate ball-blind "is play stopped?" model (Metrica training) | held-out spellF1 0.575 → 0.526 | did not help |
 | Training with a still ball placed at each restart spot, plus a ball-speed feature (Metrica training) | no change | did not help |
+| Ball-touch features: ball acceleration credited to the nearest team, summed over the past and next 2 s and 5 s | held-out mean 0.569 → 0.694 on the training trackers, but with 5 cm of noise added to the held-out ball it fell to 0.514, below the model without it (0.565) | the competition ball shows 15–100× fewer sharp velocity changes per minute than the training balls (it is smoothed), so the clue would not exist on BAR-ATH |
 | Filling the ATD's ball gaps with a pretrained ball detector (RT-DETR r18, Apache-2.0, published COCO / Objects365 weights, no training) run on the tactical video | found a ball on ~41% of in-play frames where the ATD has none; where both exist, median 1.2 m apart, but 23% of detections were over 10 m off (it loses fast and lofted balls) | too noisy where it matters most, and no training match has video, so the model could not learn how far to trust it; not used |
 
 An automatic diagnostic using Smart Tagging set-piece times showed that some goal kicks and
