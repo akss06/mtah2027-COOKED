@@ -3,8 +3,9 @@
 Frame-level possession for BAR-ATH from the provided tactical tracking, in three steps:
 
 1. **Features** ([features.py](features.py)) — per frame: each team's distance to the ball, player
-   speed, team shape (how high and how spread out each team is, and which way it is moving), and
-   where the ball was last seen relative to the lines. Plus 1 s and 5 s rolling means.
+   speed, team shape (how high and how spread out each team is, and which way it is moving), where
+   the ball was last seen relative to the lines, and each team's distance to the ball when it was
+   last and next seen. Plus 1 s, 5 s and 10 s rolling means.
 2. **Classifier** — a gradient-boosted tree model gives P(H), P(A), P(D) per frame. It is trained
    **only on other matches**: PFF FC's 64 World Cup 2022 matches ([pff_games.py](pff_games.py)) and
    Metrica's two public sample games ([sample_games.py](sample_games.py)), all labelled by code from
@@ -44,7 +45,7 @@ Point the scripts at the data:
 
 ```bash
 python solution/pff_games.py         # once, ~15 min with 6 processes: converts PFF to 25 fps
-python solution/run.py               # ~17 min, writes evaluation/results/hmm.csv
+python solution/run.py               # ~10-17 min, writes evaluation/results/hmm.csv
 python evaluation/validate_submission.py evaluation/results/hmm.csv
 ```
 

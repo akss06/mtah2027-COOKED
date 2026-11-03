@@ -4,7 +4,7 @@
 
 ## 1. Approach in one paragraph
 
-For every frame we compute about 40 features from the tracked player and ball positions, a
+For every frame we compute about 50 features from the tracked player and ball positions, a
 gradient-boosted classifier turns them into P(home), P(away), P(dead), and a three-state Viterbi
 decoder turns those per-frame probabilities into whole possessions. The classifier is trained only
 on **other matches** — PFF FC's 64 World Cup 2022 matches and Metrica Sports' two public sample
@@ -92,9 +92,13 @@ oriented to attack +x, using the side its players stand on on average in that ha
   switches discarded).
 - **Team shape:** mean and most-advanced x, spread in x and y, forward velocity of the team centre,
   tracked player count.
-- **Ball context:** whether the ball is tracked, frames since it was last seen, and how far its
-  last seen position is from the touchline and goal line.
-- 1 s and 5 s centred rolling means of the speed, shape, velocity and ball-visibility features.
+- **Ball context:** whether the ball is tracked, frames since it was last seen and until it is next
+  seen, and how far its last seen position is from the touchline and goal line.
+- **Across ball gaps:** each team's distance to the ball at the last and the next frame the ball
+  is seen, and its mean over the 2 s before and the 2 s after the frame. These carry possession
+  through the 41% of frames without a ball, and a hand-over shows up as "close before, far after".
+- 1 s and 5 s centred rolling means of the speed, shape, velocity and ball-visibility features;
+  10 s means of speed and ball visibility.
 
 ## 6. Model and decoding
 
@@ -113,7 +117,7 @@ by id). spellF1 was computed with the organisers' own `possession_metrics.py`:
 
 | temper | 1 | **2** | 4 | 8 | 16 | 32 | 64 |
 |---|---|---|---|---|---|---|---|
-| mean held-out spellF1 | 0.539 | **0.550** | 0.547 | 0.530 | 0.477 | 0.392 | 0.280 |
+| mean held-out spellF1 | 0.565 | **0.574** | 0.564 | 0.540 | 0.492 | 0.402 | 0.301 |
 
 The final model is then retrained on all 64 PFF matches plus both Metrica games.
 
@@ -135,7 +139,31 @@ Metrica game.
 
 Every model loses accuracy on a tracker it has not seen. The competition tracker is unseen by all
 of them, so we chose on the worst case, where training on both is clearly best, at almost no cost
-on PFF.
+on PFF. (This table predates the "across ball gaps" features of section 5.)
+
+### Features and decoder
+
+On the same 13 held-out cases (11 PFF, Metrica 1 and 2 under leave-one-Metrica-out, Metrica ball
+hidden on 40% of live play), temper 2:
+
+| change | held-out PFF | Metrica 1 | Metrica 2 | worst |
+|---|---|---|---|---|
+| before | 0.550 | 0.494 | 0.480 | 0.480 |
+| separate team-switch and live↔dead switch costs (best of 60 settings) | 0.553 | 0.503 | 0.490 | 0.490 |
+| **"across ball gaps" features** (adopted) | **0.574** | **0.559** | **0.535** | **0.535** |
+| + restart features: each team's speed over the 2 s before and after, ball speed and its peak over the next 1 s | 0.574 | 0.570 | 0.555 | 0.555 |
+
+The decoder change is within noise and was dropped; the "across ball gaps" features were adopted.
+The restart features were dropped as well. They were aimed at short bursts of play between two
+stoppages (a corner, a few seconds of play, a goal kick), which the model often merges into one
+stoppage: 43% of live stretches under 5 s between two stoppages are swallowed whole. They did
+not change that (44% after), the gain came from the two Metrica games only, and +0.02 is at the
+edge of noise, so we did not keep the extra complexity. A diagnosis on the
+same cases explains why: the model found 2,900 possessions where the truth has 3,946, mostly
+missing short ones (16% of true possessions last under 2 s), and split stoppages into too many
+pieces (1,465 dead spells against 1,211). Re-weighting the decoder cannot recover evidence the
+classifier never had; features that carry the ball across gaps can. With them, dead spells drop
+to 1,278.
 
 ### Other ideas
 
@@ -155,16 +183,17 @@ and for goal kicks from 25% to 46%.
 
 ## 8. Result
 
-On BAR-ATH the submission reports 236 possessions with a mean of 15 s, and calls 44% of
-graded-half frames dead. That is higher than the 33–35% typical of the training matches, but
-within PFF's range of 24–46%.
+On BAR-ATH the submission reports 228 possessions with a mean of 17 s, and calls 39% of
+graded-half frames dead. That is somewhat higher than the 33–35% typical of the training matches,
+but within PFF's range of 24–46%.
 
 Pipeline check on the public 5 minutes (17 possessions — a sanity check, not a measurement; one
 possession moves spellF1 by ~0.06):
 
 | | spellF1 | macroF1 | possessions (truth 17) |
 |---|---|---|---|
-| **ours** | **0.607** | **0.833** | 12 |
+| **ours** | **0.587** | **0.788** | 13 |
+| ours before the "across ball gaps" features | 0.607 | 0.833 | 12 |
 | baseline_smooth125 | 0.424 | 0.581 | 16 |
 | baseline_smooth50 (the published floor's setting) | 0.326 | 0.621 | 26 |
 
@@ -175,6 +204,9 @@ possession moves spellF1 by ~0.06):
   during stoppages. The worst-case test in section 7 is our best estimate of how much that costs.
 - **Short stoppages.** Quick throw-ins and goal kicks whose tracking looks like live play can be
   labelled as possession.
+- **Short possessions are under-found.** About 16% of true possessions in the held-out matches
+  last under 2 s; our output has about 3%. Short bursts of play between two stoppages are often
+  merged into one stoppage (section 7).
 - **Possibly too many dead-ball frames** on BAR-ATH (section 8). It may also be a real feature of
   this match; we have no way to check without using the ground truth.
 - **Event-derived labels are an approximation** of the corrected-tracking definition used for the
@@ -185,5 +217,5 @@ possession moves spellF1 by ~0.06):
 
 See [README.md](README.md). In short: Python 3.13, `pip install -r solution/requirements.txt`,
 get the Metrica sample data and the PFF dataset, set `MTAH_DATA_DIR`, run
-`python solution/pff_games.py` once (~15 min), then `python solution/run.py` (~17 min). Two runs
-produce byte-identical files.
+`python solution/pff_games.py` once (~15 min), then `python solution/run.py` (~10–17 min). Two
+runs produce byte-identical files.

@@ -9,6 +9,8 @@ What each group of features is for:
   * team shape        -- the team in possession spreads out and pushes up, the other compacts,
                          which still tells us something on the 41% of frames with no ball
   * ball near a line  -- where the ball was last seen, and how long ago
+  * across ball gaps  -- each team's distance to the ball when it was last / next seen, and in
+                         the 2 s before vs after the frame
 Short and long rolling means of each give the classifier context around the frame.
 """
 
@@ -19,6 +21,8 @@ import pandas as pd
 
 FPS = 25
 WINDOWS = (25, 125)  # 1 s and 5 s centred rolling means
+LONG_WINDOW = 250  # 10 s, for speed and ball visibility only
+PAST_FUTURE = 50  # 2 s one-sided means of each team's distance to the ball
 
 
 def parse_metrica_atd(raw_path: str, team_of_track: np.ndarray, pitch: tuple) -> dict:
@@ -79,11 +83,27 @@ def _block_features(home: np.ndarray, away: np.ndarray, ball: np.ndarray, length
         since = np.arange(len(ball)) - pd.Series(np.where(seen, np.arange(len(ball)), np.nan)).ffill().to_numpy()
         cols["frames_since_ball"] = since
 
+        # The ball is missing on ~41% of competition frames. Who was nearest when it was last
+        # seen, who is nearest when it reappears, and how each team's distance to it differs
+        # just before vs just after the frame carry the possession across the gap -- and a
+        # hand-over shows up as "close before, far after".
+        for prefix in ("home_", "away_"):
+            dist = pd.Series(np.where(seen, cols[prefix + "ball_dist"], np.nan))
+            cols[prefix + "ball_dist_last"] = dist.ffill().to_numpy()
+            cols[prefix + "ball_dist_next"] = dist.bfill().to_numpy()
+            cols[prefix + "ball_dist_past"] = dist.rolling(PAST_FUTURE, min_periods=1).mean().to_numpy()
+            cols[prefix + "ball_dist_future"] = (
+                dist[::-1].rolling(PAST_FUTURE, min_periods=1).mean()[::-1].to_numpy())
+        upcoming = pd.Series(np.where(seen, np.arange(len(ball)), np.nan)).bfill().to_numpy()
+        cols["frames_until_ball"] = upcoming - np.arange(len(ball))
+
     frame = pd.DataFrame(cols)
     for window in WINDOWS:
         for name in ("home_speed", "away_speed", "ball_seen", "ball_dist_diff", "home_x_velocity",
                      "away_x_velocity", "home_x_spread", "away_x_spread"):
             frame["{}_m{}".format(name, window)] = _centred_mean(frame[name].to_numpy(), window)
+    for name in ("home_speed", "away_speed", "ball_seen"):
+        frame["{}_m{}".format(name, LONG_WINDOW)] = _centred_mean(frame[name].to_numpy(), LONG_WINDOW)
     return frame
 
 
