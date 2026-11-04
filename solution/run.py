@@ -7,7 +7,8 @@
 2. A gradient-boosted classifier turns them into P(H), P(A), P(D) per frame. It is trained on
    other matches only -- the 7 IDSSE matches and Metrica's 2 sample games. Their ball is smoothed
    like the competition tracker's; each is used as is and as a copy whose ball is hidden as often
-   as the competition tracker loses it, and each with home and away swapped.
+   as the competition tracker loses it, and each with home and away swapped. Frames are weighted
+   so every possession counts about equally, as it does in the metric.
 3. The Viterbi judge (hmm.py) turns those per-frame probabilities into whole possessions.
 
 The one free knob, `temper`, is chosen leave-one-match-out over those 9 matches: each is scored by
@@ -46,6 +47,10 @@ DEAD_MISSING = 0.70
 # and noise floor best (calibrate_ball.py, from aggregates of its input data only).
 BALL_WINDOW = 37
 BALL_JITTER_CM = 1.5
+# spellF1 counts every possession once, however long. Unweighted, a 1 s possession gives the
+# classifier 25 frames and a 60 s one 1,500, so short possessions barely register. Weighting each
+# frame by 10 s / its run's length makes runs count about equally (clipped to 0.1-10).
+WEIGHT_SECONDS = 10
 SEED = 0
 SWAP_LABEL = {"H": "A", "A": "H", "D": "D", "X": "X"}
 MODEL_PATH = os.path.join(HERE, "model", "cooked_model.joblib")  # trained on external data only
@@ -75,6 +80,15 @@ def smooth_ball(ball: np.ndarray, window: int, jitter_cm: float, rng: np.random.
     return out
 
 
+def run_weights(labels: np.ndarray) -> np.ndarray:
+    """Per-frame training weight: WEIGHT_SECONDS / length of the run (of any label) it sits in."""
+    out = np.ones(len(labels))
+    breaks = np.flatnonzero(labels[1:] != labels[:-1]) + 1
+    for a, b in zip(np.r_[0, breaks], np.r_[breaks, len(labels)]):
+        out[a:b] = np.clip(WEIGHT_SECONDS * features.FPS / (b - a), 0.1, 10)
+    return out
+
+
 def degrade(track: dict, labels: np.ndarray, rng: np.random.Generator) -> dict:
     """Hide the ball as often as the competition tracker loses it."""
     track = features.mask_ball(track, labels, ALIVE_MISSING, rng, ("H", "A"))
@@ -95,14 +109,17 @@ def prepare(matches: list) -> list:
         track = {**track, "ball": ball}
         degraded = degrade(track, labels, np.random.default_rng(SEED + i))
         held_out = features.build(degraded, blocks, pitch)
-        rows, targets = [], []
+        frame_weights = run_weights(labels)
+        rows, targets, weights = [], [], []
         for frame in (features.build(track, blocks, pitch), held_out):
             frame = frame.iloc[::TRAIN_STEP]
             y = labels[frame.index]
             rows += [frame.to_numpy(), features.swap_teams(frame).to_numpy()]
             targets += [y, np.array([SWAP_LABEL[v] for v in y])]
+            weights += [frame_weights[frame.index]] * 2
         prepared.append({"name": name, "labels": labels, "blocks": blocks, "held_out": held_out,
-                         "x": np.vstack(rows), "y": np.concatenate(targets)})
+                         "x": np.vstack(rows), "y": np.concatenate(targets),
+                         "w": np.concatenate(weights)})
         print("  prepared {}".format(name), flush=True)
     return prepared
 
@@ -111,9 +128,10 @@ def train(prepared: list) -> tuple:
     """(classifier, class prior, transitions) from prepared matches."""
     x = np.vstack([p["x"] for p in prepared])
     y = np.concatenate([p["y"] for p in prepared])
+    w = np.concatenate([p["w"] for p in prepared])
     model = HistGradientBoostingClassifier(max_iter=600, max_leaf_nodes=63, learning_rate=0.05,
-                                           random_state=SEED).fit(x, y)
-    prior = np.array([np.mean(y == s) for s in hmm.STATES])
+                                           random_state=SEED).fit(x, y, sample_weight=w)
+    prior = np.array([np.average(y == s, weights=w) for s in hmm.STATES])
     trans = hmm.count_transitions(np.concatenate([np.append(p["labels"], "X") for p in prepared]))
     return model, prior, trans
 

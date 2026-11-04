@@ -14,7 +14,8 @@ Frame-level possession for BAR-ATH from the provided tactical tracking, in three
    their event data. Their ball is smoothed to look like the competition tracker's
    ([calibrate_ball.py](calibrate_ball.py) sets how much, from aggregates of the competition
    input), and every match is used as is and with the ball hidden as often as the competition
-   tracker loses it, each also with home and away swapped.
+   tracker loses it, each also with home and away swapped. Frames are weighted by 10 s ÷ the
+   length of their possession, because the metric counts every possession equally.
 3. **Viterbi decoding** ([hmm.py](hmm.py)) — turns the per-frame probabilities into whole
    possessions, charging for every change of state at the rate possession changes in the training
    matches. The one free setting (how much to trust neighbouring frames) is chosen leave-one-match-out

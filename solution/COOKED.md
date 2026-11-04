@@ -9,7 +9,8 @@ gradient-boosted classifier turns them into P(home), P(away), P(dead), and a thr
 decoder turns those per-frame probabilities into whole possessions. The classifier is trained only
 on **other matches**: the 7 matches of the IDSSE open dataset (official Bundesliga tracking with
 per-frame ball-status and possession flags) and Metrica Sports' two public sample games. Their
-ball is smoothed and hidden to look like the competition tracker's. Nothing is fitted, tuned or
+ball is smoothed and hidden to look like the competition tracker's, and their frames are weighted
+so that every possession counts about equally, as it does in the metric. Nothing is fitted, tuned or
 selected on the competition match's ground truth or video.
 
 ## 2. Why this design
@@ -112,6 +113,10 @@ Using frames after the one being labelled is allowed: the task is post-match.
 - **Classifier:** scikit-learn `HistGradientBoostingClassifier` (600 iterations, 63 leaves per
   tree, learning rate 0.05, fixed seed), trained on every 5th frame — neighbours are
   near-duplicates. The size was chosen leave-one-match-out (section 7).
+- **Weights:** each training frame is weighted by 10 s ÷ the length of the run (H, A or D) it
+  belongs to, clipped to 0.1–10. spellF1 counts a 1 s possession like a 60 s one; unweighted, the
+  classifier sees 60× fewer frames of it and learns to ignore it. The class prior is the weighted
+  one.
 - **Emissions:** the classifier's P(state | features) divided by the class prior (a scaled
   likelihood), then divided by a *temper* factor. Neighbouring frames are nearly copies of each
   other, so treating each as independent evidence overcounts it and makes the decoder flip on short
@@ -123,12 +128,12 @@ Using frames after the one being labelled is allowed: the task is post-match.
 match, with its ball smoothed and hidden as above, is scored by a model trained on the other 8.
 spellF1 is computed with the organisers' own `possession_metrics.py`:
 
-| temper | **1** | 2 | 4 | 8 | 16 |
+| temper | 1 | **2** | 4 | 8 | 16 |
 |---|---|---|---|---|---|
-| mean held-out spellF1 | **0.5594** | 0.5588 | 0.548 | 0.517 | 0.466 |
-| worst held-out match | **0.482** | 0.479 | 0.467 | 0.450 | 0.361 |
+| mean held-out spellF1 | 0.5628 | **0.5745** | 0.570 | 0.539 | 0.475 |
+| worst held-out match | 0.476 | **0.486** | 0.484 | 0.467 | 0.381 |
 
-Per held-out match at temper 1: IDSSE 0.482–0.620, Metrica 0.606 and 0.631. The final model is
+Per held-out match at temper 2: IDSSE 0.486–0.615, Metrica 0.603 and 0.635. The final model is
 then trained on all 9 matches. These scores are lower than earlier versions in section 7 because
 the held-out ball is now smoothed like the competition's, a harder and more realistic test.
 
@@ -289,7 +294,26 @@ candidates reasonably (AUC 0.80), but its 50 most confident were only ~30% real.
 threshold chosen on the other 8 matches, it scored 0.5588 against 0.5594 without it. On the
 smoothed ball the turn credit is near zero even at real touches: the touch is blurred into the
 movement around it. We conclude that most short possessions are not recoverable from this tracking
-data; we did not keep the second stage.
+data; we did not keep the second stage. Allowing it to insert only within 2 s or 5 s of a
+possession's start or end, where a wrong insertion leaves the long remainder still matching, did not
+change that (0.5587 and 0.5592, threshold chosen the same way).
+
+The competition's *player* tracks, unlike its ball, are as sharp as the training ones (the 99th
+percentile of a player's velocity change over ±0.5 s is 2.6 m/s against 2.3–2.4 on IDSSE). So we
+added each team's sharpest player turn near the ball, with sums over the 2 s and 5 s either side:
+0.5588 against 0.5594, not kept.
+
+**What did work (adopted): weighting training frames by possession length** (section 6).
+Unweighted, the classifier's loss is dominated by long possessions and long stoppages. Weighted:
+
+| seed | without weights | with weights | worst match | IDSSE | Metrica | matches better |
+|---|---|---|---|---|---|---|
+| 0 | 0.5594 | **0.5745** | 0.482 → 0.486 | +0.019 | ±0.000 | 7 of 9 |
+| 1 | 0.5624 | **0.5851** | 0.482 → 0.495 | +0.024 | +0.018 | 8 of 9 |
+
+(each at the temper it chooses for itself: 1 and 2 without weights, 2 with them). The share of
+true sub-2 s possessions found rises from 19% to 22%. The seed changes both the classifier and
+which frames lose the ball, so each seed is compared with a baseline run at the same seed.
 
 An automatic diagnostic using Smart Tagging set-piece times showed that some goal kicks and
 throw-ins look exactly like live play in the tracking: the ball is visible and moving at ~4.5 m/s,
@@ -297,31 +321,32 @@ and players run at ~2 m/s. The tracking alone cannot separate those.
 
 ## 8. Result
 
-On BAR-ATH the submission reports 371 possessions with a mean of 10.3 s (23% under 2 s), and calls
-40% of graded-half frames dead, close to the 41–52% of the IDSSE matches.
+On BAR-ATH the submission reports 379 possessions with a median of 5.6 s (15% under 2 s), and
+calls 43% of graded-half frames dead, within the 41–52% of the IDSSE matches.
 
 Pipeline check on the public 5 minutes (17 possessions — a sanity check, not a measurement; one
 possession moves spellF1 by ~0.06):
 
 | | spellF1 | macroF1 | possessions (truth 17) |
 |---|---|---|---|
-| **ours** | **0.581** | **0.748** | 14 |
+| **ours** | **0.589** | **0.773** | 19 |
 | baseline_smooth125 | 0.424 | 0.581 | 16 |
 | baseline_smooth50 (the published floor's setting) | 0.326 | 0.621 | 26 |
 
-The sharp-ball model scored 0.710 on these 5 minutes. We adopted the smoothed-ball model on the
-leave-one-match-out evidence above, which covers about 3,900 possessions on 9 matches; this window
-was not used for that choice and could not be, under the rules.
+Earlier versions scored 0.710 (sharp training ball) and 0.581 (smoothed ball, unweighted) on these
+5 minutes. Each change was adopted on the leave-one-match-out evidence above, which covers about
+3,900 possessions on 9 matches; this window was not used for any choice and could not be, under
+the rules.
 
 ## 9. Limitations
 
 - **Domain gap.** Neither training source uses the competition tracker. Its ball is imitated by a
   moving average plus jitter matched on three statistics, and its ball loss by hiding the ball at
   its overall rate; the real filter and where it loses the ball are unknown.
-- **Small training set.** 9 matches; the worst held-out match scores 0.48 against a mean of 0.56.
-- **Short possessions.** Most touches and deflections lasting under 2 s are missed, and fixing all
-  of them would be worth about +0.19 (section 7). On a ball smoothed over ~1.5 s, a touch this
-  short barely leaves a trace. This also assumes IDSSE's possession flag switches on every touch,
+- **Small training set.** 9 matches; the worst held-out match scores 0.49 against a mean of 0.57.
+- **Short possessions.** Most touches and deflections lasting under 2 s are still missed (about
+  22% are found), and fixing all of them would be worth about +0.19 (section 7). On a ball smoothed
+  over ~1.5 s, a touch this short barely leaves a trace. This also assumes IDSSE's possession flag switches on every touch,
   as the competition ground truth does; we could not check it against video.
 - **Short stoppages and short bursts.** Quick throw-ins and goal kicks whose tracking looks like
   live play can be labelled as possession, and a few seconds of play between two stoppages can be
