@@ -188,6 +188,35 @@ dropped them rather than risk fitting two matches.
 | Ball-touch features: ball acceleration credited to the nearest team, summed over the past and next 2 s and 5 s | held-out mean 0.569 → 0.694 on the training trackers, but with 5 cm of noise added to the held-out ball it fell to 0.514, below the model without it (0.565) | the competition ball shows 15–100× fewer sharp velocity changes per minute than the training balls (it is smoothed), so the clue would not exist on BAR-ATH |
 | Filling the ATD's ball gaps with a pretrained ball detector (RT-DETR r18, Apache-2.0, published COCO / Objects365 weights, no training) run on the tactical video | found a ball on ~41% of in-play frames where the ATD has none; where both exist, median 1.2 m apart, but 23% of detections were over 10 m off (it loses fast and lofted balls) | too noisy where it matters most, and no training match has video, so the model could not learn how far to trust it; not used |
 
+### Variants of the submitted model (IDSSE + Metrica, leave-one-match-out)
+
+Each changes one thing in the submitted 600 / 63 model (mean 0.569, worst 0.502). Retraining it
+with two other random seeds moved the mean by +0.006 / +0.007 and the worst match by −0.007 /
+−0.017, so changes of that size are noise. Our bar for adopting a change: mean +0.015 or more, worst
+match not lower, gains on both IDSSE and Metrica. None passed.
+
+| variant | mean | worst |
+|---|---|---|
+| submitted model | 0.569 | 0.502 |
+| 3× / 6× sample weight on short possessions and within 0.5 s of a change of team | 0.577 / 0.576 | 0.495 / 0.496 |
+| average of 3 models with different seeds | 0.571 | 0.500 |
+| train on every 2nd frame instead of every 5th | 0.570 | 0.499 |
+| 30 s and 60 s averages of player speed, ball visibility and team spread (aimed at long stoppages) | 0.568 | 0.502 |
+| players in each box, players off the pitch, keeper-to-ball distance (aimed at set pieces) | 0.566 | 0.488 |
+| IDSSE only, without Metrica | 0.559 | 0.503 (Metrica games −0.051) |
+| training ball smoothed and jittered to look like the competition ball (window and noise chosen from aggregates of the BAR-ATH input) | 0.537 | 0.461 |
+| the same, plus slower ball-touch features over ~0.5 s | 0.559 | 0.479 |
+| simulated Smart Tagging set pieces as features (below) | 0.571 | 0.491 |
+
+Smart Tagging cannot be learned from directly, since no training match has it, so we simulated it
+on the training matches. Every set-piece tag on BAR-ATH lasts 35 s and starts ~4.7 s before the
+restart. That offset was measured against our own output, not the ground truth. There are 59
+tags, against ~100 restarts in a training match. Fake tags were drawn from each training match's
+true restarts at similar rates per restart type, with timing noise, 10% false tags and 10% wrong
+teams. The model barely used them: with the held-out match's tags removed it scored 0.568, and
+with deliberately worse tags 0.572. The tags mark restarts the model already finds; its errors are
+short possessions in open play.
+
 An automatic diagnostic using Smart Tagging set-piece times showed that some goal kicks and
 throw-ins look exactly like live play in the tracking: the ball is visible and moving at ~4.5 m/s,
 and players run at ~2 m/s. The tracking alone cannot separate those.
@@ -226,4 +255,5 @@ possession moves spellF1 by ~0.06):
 See [README.md](README.md). In short: Python 3.13, `pip install -r solution/requirements.txt`,
 get the Metrica sample data and the IDSSE files, set `MTAH_DATA_DIR`, run
 `python solution/idsse_games.py` once (~30 s), then `python solution/run.py` (~35 min). Two runs
-produce byte-identical files.
+produce byte-identical files, and so did a run from a fresh clone with a freshly built IDSSE cache
+and a different thread count (14 instead of 16).
