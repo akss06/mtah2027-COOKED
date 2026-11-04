@@ -5,9 +5,9 @@
 
 1. Features per frame (features.py): ball vs players, player speed, team shape, ball context.
 2. A gradient-boosted classifier turns them into P(H), P(A), P(D) per frame. It is trained on
-   other matches only -- the 7 IDSSE matches and Metrica's 2 sample games -- each as recorded and
-   as a copy whose ball is hidden as often as the competition tracker loses it, and each with home
-   and away swapped.
+   other matches only -- the 7 IDSSE matches and Metrica's 2 sample games. Their ball is smoothed
+   like the competition tracker's; each is used as is and as a copy whose ball is hidden as often
+   as the competition tracker loses it, and each with home and away swapped.
 3. The Viterbi judge (hmm.py) turns those per-frame probabilities into whole possessions.
 
 The one free knob, `temper`, is chosen leave-one-match-out over those 9 matches: each is scored by
@@ -19,6 +19,7 @@ import os
 import sys
 
 import numpy as np
+import pandas as pd
 from sklearn.ensemble import HistGradientBoostingClassifier
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -39,6 +40,11 @@ TRAIN_STEP = 5  # neighbouring frames are near-duplicates; every 5th is plenty t
 # not of any labels). Hiding it on 25% of live and 70% of dead frames matches that overall rate.
 ALIVE_MISSING = 0.25
 DEAD_MISSING = 0.70
+# The competition tracker's ball is smooth: 15-100x fewer sharp velocity changes per minute than
+# the training balls. A centred mean over 37 frames plus 1.5 cm of jitter matches its peak rates
+# and noise floor best (calibrate_ball.py, from aggregates of its input data only).
+BALL_WINDOW = 37
+BALL_JITTER_CM = 1.5
 SEED = 0
 SWAP_LABEL = {"H": "A", "A": "H", "D": "D", "X": "X"}
 
@@ -59,6 +65,14 @@ def training_matches() -> list:
     return out
 
 
+def smooth_ball(ball: np.ndarray, window: int, jitter_cm: float, rng: np.random.Generator) -> np.ndarray:
+    """Centred moving average over `window` frames, then Gaussian jitter. Gaps stay gaps."""
+    out = pd.DataFrame(ball).rolling(window, center=True, min_periods=1).mean().to_numpy()
+    out = out + rng.normal(0, jitter_cm / 100, out.shape)
+    out[np.isnan(ball[:, 0])] = np.nan
+    return out
+
+
 def degrade(track: dict, labels: np.ndarray, rng: np.random.Generator) -> dict:
     """Hide the ball as often as the competition tracker loses it."""
     track = features.mask_ball(track, labels, ALIVE_MISSING, rng, ("H", "A"))
@@ -66,7 +80,8 @@ def degrade(track: dict, labels: np.ndarray, rng: np.random.Generator) -> dict:
 
 
 def prepare(matches: list) -> list:
-    """Per match: training rows (as recorded + degraded, both team orders) and held-out features.
+    """Per match: training rows (ball smoothed like the competition tracker's, with and without
+    the competition's ball gaps, both team orders) and held-out features.
 
     Built once and reused by every leave-one-out fold. Each match gets its own seed, so the
     degraded copy does not depend on which other matches are loaded.
@@ -74,6 +89,8 @@ def prepare(matches: list) -> list:
     prepared = []
     for i, (name, track, labels, pitch) in enumerate(matches):
         blocks = labelled_blocks(labels)
+        ball = smooth_ball(track["ball"], BALL_WINDOW, BALL_JITTER_CM, np.random.default_rng(SEED + 2000 + i))
+        track = {**track, "ball": ball}
         degraded = degrade(track, labels, np.random.default_rng(SEED + i))
         held_out = features.build(degraded, blocks, pitch)
         rows, targets = [], []

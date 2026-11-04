@@ -11,6 +11,8 @@ What each group of features is for:
   * ball near a line  -- where the ball was last seen, and how long ago
   * across ball gaps  -- each team's distance to the ball when it was last / next seen, and in
                          the 2 s before vs after the frame
+  * ball touches      -- sudden changes of the ball's velocity, credited to the team nearest the
+                         ball, summed over the past and next 2 s and 5 s
 Short and long rolling means of each give the classifier context around the frame.
 """
 
@@ -23,6 +25,10 @@ FPS = 25
 WINDOWS = (25, 125)  # 1 s and 5 s centred rolling means
 LONG_WINDOW = 250  # 10 s, for speed and ball visibility only
 PAST_FUTURE = 50  # 2 s one-sided means of each team's distance to the ball
+# A nearest player further than this gets no credit for a touch. On IDSSE the gaining team's
+# nearest player is a median 0.62 m (p90 1.13 m) from the ball when the official flag switches.
+REACH = 2.0
+TURN = 12  # frames: the ball's velocity over the past vs the next ~0.5 s
 
 
 def parse_metrica_atd(raw_path: str, team_of_track: np.ndarray, pitch: tuple) -> dict:
@@ -42,6 +48,46 @@ def parse_metrica_atd(raw_path: str, team_of_track: np.ndarray, pitch: tuple) ->
 
 def _centred_mean(values: np.ndarray, window: int) -> np.ndarray:
     return pd.Series(values).rolling(window, center=True, min_periods=1).mean().to_numpy()
+
+
+def _one_sided_sum(values: np.ndarray, window: int, future: bool) -> np.ndarray:
+    s = pd.Series(values[::-1] if future else values).rolling(window, min_periods=1).sum()
+    return s.to_numpy()[::-1] if future else s.to_numpy()
+
+
+def _touch_features(frame: pd.DataFrame, ball: np.ndarray) -> None:
+    """A touch shows up as a change in the ball's velocity: frame-to-frame (acceleration) and over
+    ~0.5 s either side (turn), which survives the competition tracker's smoothing better. Each is
+    credited to the team nearest the ball, scaled down with that player's distance; one-sided
+    sums tell each frame which team touched the ball recently and which touches it next."""
+    with np.errstate(invalid="ignore"):
+        velocity = np.gradient(ball, axis=0) * FPS  # NaN next to ball gaps
+        accel = np.nan_to_num(np.linalg.norm(np.gradient(velocity, axis=0), axis=1) * FPS)
+        past = np.full_like(ball, np.nan)
+        nxt = np.full_like(ball, np.nan)
+        past[TURN:] = (ball[TURN:] - ball[:-TURN]) / (TURN / FPS)
+        nxt[:-TURN] = (ball[TURN:] - ball[:-TURN]) / (TURN / FPS)
+        turn = np.nan_to_num(np.linalg.norm(nxt - past, axis=1))
+        frame["ball_speed"] = np.linalg.norm(velocity, axis=1)
+        frame["ball_accel"] = accel
+        frame["ball_accel_m25"] = _centred_mean(accel, 25)
+        for own, other in (("home_", "away_"), ("away_", "home_")):
+            _credit_to_team(frame, own, other, accel, "touch")
+            # Negative while the ball travels towards this team's nearest player.
+            frame[own + "ball_dist_rate"] = np.gradient(frame[own + "ball_dist"].to_numpy()) * FPS
+        frame["ball_turn"] = turn
+        for own, other in (("home_", "away_"), ("away_", "home_")):
+            _credit_to_team(frame, own, other, turn, "turn")
+
+
+def _credit_to_team(frame: pd.DataFrame, own: str, other: str, signal: np.ndarray, name: str) -> None:
+    dist = frame[own + "ball_dist"].to_numpy()
+    nearest = dist < frame[other + "ball_dist"].to_numpy()
+    credit = np.nan_to_num(np.where(nearest, signal * np.clip(1 - dist / REACH, 0, 1), 0))
+    frame[own + name] = credit
+    for window in (PAST_FUTURE, WINDOWS[1]):
+        frame["{}{}_past{}".format(own, name, window)] = _one_sided_sum(credit, window, False)
+        frame["{}{}_future{}".format(own, name, window)] = _one_sided_sum(credit, window, True)
 
 
 def _block_features(home: np.ndarray, away: np.ndarray, ball: np.ndarray, length: float,
@@ -104,6 +150,7 @@ def _block_features(home: np.ndarray, away: np.ndarray, ball: np.ndarray, length
             frame["{}_m{}".format(name, window)] = _centred_mean(frame[name].to_numpy(), window)
     for name in ("home_speed", "away_speed", "ball_seen"):
         frame["{}_m{}".format(name, LONG_WINDOW)] = _centred_mean(frame[name].to_numpy(), LONG_WINDOW)
+    _touch_features(frame, ball)
     return frame
 
 
