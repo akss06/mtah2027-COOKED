@@ -4,7 +4,7 @@
 
 ## 1. Approach in one paragraph
 
-For every frame we compute 78 features from the tracked player and ball positions, a
+For every frame we compute 96 features from the tracked player and ball positions, a
 gradient-boosted classifier turns them into P(home), P(away), P(dead), and a three-state Viterbi
 decoder turns those per-frame probabilities into whole possessions. The classifier is trained only
 on **other matches**: the 7 matches of the IDSSE open dataset (official Bundesliga tracking with
@@ -103,6 +103,14 @@ oriented to attack +x, using the side its players stand on on average in that ha
   survives the tracker's smoothing better. Each is credited to the team whose player is nearest
   the ball, scaled down linearly to zero at 2 m, and summed over the past and the next 2 s and
   5 s. Also ball speed and each team's rate of approach to the ball.
+- **Kick direction ("straddled lines"):** the competition ball is blurred over ~0.75 s either side
+  of a touch, so the ball's path 0.8–1.6 s before and 0.8–1.6 s after a frame is unaffected by a
+  touch at that frame. Least-squares lines are fitted to the visible ball in both windows (at
+  least 6 frames each) and extended to the frame. Their difference in velocity is the push the
+  ball got there; their midpoint and gap say where and how cleanly. Per team: its nearest player's
+  distance to that point, the push credited to it within 2.5 m (summed over the past and next 2 s
+  and 5 s), that player's speed along the push, and whether it stands on the side the push came
+  from. Available on ~45% of frames.
 - 1 s and 5 s centred rolling means of the speed, shape, velocity and ball-visibility features;
   10 s means of speed and ball visibility.
 
@@ -130,10 +138,10 @@ spellF1 is computed with the organisers' own `possession_metrics.py`:
 
 | temper | 1 | **2** | 4 | 8 | 16 |
 |---|---|---|---|---|---|
-| mean held-out spellF1 | 0.5628 | **0.5745** | 0.570 | 0.539 | 0.475 |
-| worst held-out match | 0.476 | **0.486** | 0.484 | 0.467 | 0.381 |
+| mean held-out spellF1 | 0.5761 | **0.5933** | 0.593 | 0.562 | 0.490 |
+| worst held-out match | 0.488 | **0.516** | 0.530 | 0.498 | 0.399 |
 
-Per held-out match at temper 2: IDSSE 0.486–0.615, Metrica 0.603 and 0.635. The final model is
+Per held-out match at temper 2: IDSSE 0.516–0.631, Metrica 0.646 and 0.625. The final model is
 then trained on all 9 matches. These scores are lower than earlier versions in section 7 because
 the held-out ball is now smoothed like the competition's, a harder and more realistic test.
 
@@ -315,13 +323,34 @@ Unweighted, the classifier's loss is dominated by long possessions and long stop
 true sub-2 s possessions found rises from 19% to 22%. The seed changes both the classifier and
 which frames lose the ball, so each seed is compared with a baseline run at the same seed.
 
+**Also adopted: kick-direction features** (section 5), on top of the weights: 0.5745 → **0.5933**,
+worst match 0.486 → 0.516, IDSSE +0.020, Metrica +0.017, no match worse; sub-2 s possessions
+found 22% → 24%. Because they assume a blur radius, they were stress-tested on a held-out ball
+blurred differently from training (temper 2, gain over the weighted model):
+
+| held-out ball | gain (mean) | gain (worst match) | matches better |
+|---|---|---|---|
+| as calibrated (37-frame average, 1.5 cm) | +0.019 | +0.030 | 9 of 9 |
+| 50-frame (2 s) / 75-frame (3 s) average | +0.023 / +0.012 | +0.047 / +0.052 | 9 / 7 of 9 |
+| Gaussian, same spread | +0.017 | +0.024 | 8 of 9 |
+| two-sided exponential (Kalman-like), same spread | +0.013 | +0.013 | 9 of 9 |
+| + 5 / 10 / 20 cm noise | +0.011 / +0.016 / +0.010 | +0.012 / +0.028 / +0.007 | 8 of 9 each |
+
+Tried at the same time and not kept: a decoder with a "short" and a "long" state per team, its
+durations fitted to the training runs (0.5749 vs 0.5745); the restart rule — after a throw-in,
+corner or goal kick the restarting team did not touch the ball last, so X → dead → X restarts
+imply a short spell of the other team before the stoppage (right 74–82% of the time but only ~6
+times per match, and often mistimed: 0.5741 vs 0.5745); and a five-class target with separate
+classes for possessions under 2 s (0.5603 vs 0.5745: whether a spell will be short depends on
+what happens later, which the frame's features cannot see).
+
 An automatic diagnostic using Smart Tagging set-piece times showed that some goal kicks and
 throw-ins look exactly like live play in the tracking: the ball is visible and moving at ~4.5 m/s,
 and players run at ~2 m/s. The tracking alone cannot separate those.
 
 ## 8. Result
 
-On BAR-ATH the submission reports 379 possessions with a median of 5.6 s (15% under 2 s), and
+On BAR-ATH the submission reports 386 possessions with a median of 5.1 s (16% under 2 s), and
 calls 43% of graded-half frames dead, within the 41–52% of the IDSSE matches.
 
 Pipeline check on the public 5 minutes (17 possessions — a sanity check, not a measurement; one
@@ -329,12 +358,12 @@ possession moves spellF1 by ~0.06):
 
 | | spellF1 | macroF1 | possessions (truth 17) |
 |---|---|---|---|
-| **ours** | **0.589** | **0.773** | 19 |
+| **ours** | **0.649** | **0.759** | 20 |
 | baseline_smooth125 | 0.424 | 0.581 | 16 |
 | baseline_smooth50 (the published floor's setting) | 0.326 | 0.621 | 26 |
 
-Earlier versions scored 0.710 (sharp training ball) and 0.581 (smoothed ball, unweighted) on these
-5 minutes. Each change was adopted on the leave-one-match-out evidence above, which covers about
+Earlier versions scored 0.710 (sharp training ball), 0.581 (smoothed ball, unweighted) and 0.589
+(weighted, without kick direction) on these 5 minutes. Each change was adopted on the leave-one-match-out evidence above, which covers about
 3,900 possessions on 9 matches; this window was not used for any choice and could not be, under
 the rules.
 
@@ -343,9 +372,9 @@ the rules.
 - **Domain gap.** Neither training source uses the competition tracker. Its ball is imitated by a
   moving average plus jitter matched on three statistics, and its ball loss by hiding the ball at
   its overall rate; the real filter and where it loses the ball are unknown.
-- **Small training set.** 9 matches; the worst held-out match scores 0.49 against a mean of 0.57.
+- **Small training set.** 9 matches; the worst held-out match scores 0.52 against a mean of 0.59.
 - **Short possessions.** Most touches and deflections lasting under 2 s are still missed (about
-  22% are found), and fixing all of them would be worth about +0.19 (section 7). On a ball smoothed
+  24% are found), and fixing all of them would be worth about +0.19 (section 7). On a ball smoothed
   over ~1.5 s, a touch this short barely leaves a trace. This also assumes IDSSE's possession flag switches on every touch,
   as the competition ground truth does; we could not check it against video.
 - **Short stoppages and short bursts.** Quick throw-ins and goal kicks whose tracking looks like

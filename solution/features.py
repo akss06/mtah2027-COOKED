@@ -13,6 +13,9 @@ What each group of features is for:
                          the 2 s before vs after the frame
   * ball touches      -- sudden changes of the ball's velocity, credited to the team nearest the
                          ball, summed over the past and next 2 s and 5 s
+  * kick direction    -- the ball's path 0.8-1.6 s before and after each frame, outside the blur
+                         of a touch at that frame: where the two meet, how hard and which way the
+                         ball was pushed, and whether each team's nearest player fits that push
 Short and long rolling means of each give the classifier context around the frame.
 """
 
@@ -29,6 +32,11 @@ PAST_FUTURE = 50  # 2 s one-sided means of each team's distance to the ball
 # nearest player is a median 0.62 m (p90 1.13 m) from the ball when the official flag switches.
 REACH = 2.0
 TURN = 12  # frames: the ball's velocity over the past vs the next ~0.5 s
+# The competition ball is blurred over ~1.5 s (0.75 s either side), so straight-line fits to the
+# ball 0.8-1.6 s before and after a frame are untouched by a touch at that frame.
+APEX_NEAR, APEX_FAR = 20, 40  # frames
+APEX_MIN_SEEN = 6  # visible ball frames needed in each window
+APEX_REACH = 2.5  # m
 
 
 def parse_metrica_atd(raw_path: str, team_of_track: np.ndarray, pitch: tuple) -> dict:
@@ -88,6 +96,65 @@ def _credit_to_team(frame: pd.DataFrame, own: str, other: str, signal: np.ndarra
     for window in (PAST_FUTURE, WINDOWS[1]):
         frame["{}{}_past{}".format(own, name, window)] = _one_sided_sum(credit, window, False)
         frame["{}{}_future{}".format(own, name, window)] = _one_sided_sum(credit, window, True)
+
+
+def _window_line(ball: np.ndarray, start: int, stop: int) -> tuple:
+    """Least-squares line through the visible ball in frames [t+start, t+stop) for every t,
+    evaluated at t: (position, velocity in m/s), NaN where too few samples."""
+    n = len(ball)
+    seen = ~np.isnan(ball[:, 0])
+    lo = np.clip(np.arange(n) + start, 0, n)
+    hi = np.clip(np.arange(n) + stop, 0, n)
+
+    def wsum(v: np.ndarray) -> np.ndarray:
+        c = np.r_[0.0, np.cumsum(v)]
+        return c[hi] - c[lo]
+
+    tt = np.arange(n, dtype=float)
+    m = seen.astype(float)
+    s0, s1, s2 = wsum(m), wsum(m * tt), wsum(m * tt * tt)
+    tbar = s1 / s0
+    var = s2 / s0 - tbar ** 2
+    pos, vel = np.full((n, 2), np.nan), np.full((n, 2), np.nan)
+    for d in range(2):
+        x = np.where(seen, ball[:, d], 0.0)
+        sx, stx = wsum(x), wsum(x * tt)
+        slope = (stx / s0 - tbar * sx / s0) / var
+        pos[:, d] = sx / s0 + slope * (tt - tbar)
+        vel[:, d] = slope * FPS
+    bad = (s0 < APEX_MIN_SEEN) | (var < 1)
+    pos[bad], vel[bad] = np.nan, np.nan
+    return pos, vel
+
+
+def _apex_features(frame: pd.DataFrame, home: np.ndarray, away: np.ndarray, ball: np.ndarray) -> None:
+    """Extrapolate the lines before and after each frame to the frame: their midpoint (apex) and
+    gap, and the push v_after - v_before. Per team: its nearest player's distance to the apex,
+    the push credited to it within APEX_REACH (summed over the past and next 2 s and 5 s), that
+    player's speed along the push, and whether it stands on the side the push came from."""
+    p_in, v_in = _window_line(ball, -APEX_FAR, -APEX_NEAR)
+    p_out, v_out = _window_line(ball, APEX_NEAR + 1, APEX_FAR + 1)
+    apex = (p_in + p_out) / 2
+    dv = v_out - v_in
+    dvn = np.linalg.norm(dv, axis=1)
+    unit = dv / (dvn[:, None] + 1e-6)
+    frame["apex_gap"] = np.linalg.norm(p_in - p_out, axis=1)
+    frame["apex_dv"] = dvn
+    rows = np.arange(len(ball))
+    for prefix, players in (("home_", home), ("away_", away)):
+        vel = np.gradient(players, axis=0) * FPS
+        rel = apex[:, None, :] - players
+        dist = np.linalg.norm(rel, axis=2)
+        nearest = np.nanargmin(np.where(np.isnan(dist), np.inf, dist), axis=1)
+        d, v, r = dist[rows, nearest], vel[rows, nearest], rel[rows, nearest]
+        credit = np.nan_to_num(dvn * np.clip(1 - d / APEX_REACH, 0, 1))
+        frame[prefix + "apex_dist"] = d
+        frame[prefix + "apex_touch"] = credit
+        frame[prefix + "apex_align"] = np.sum(v * unit, axis=1)
+        frame[prefix + "apex_side"] = np.sum(r * unit, axis=1) / (np.linalg.norm(r, axis=1) + 1e-6)
+        for window in (PAST_FUTURE, WINDOWS[1]):
+            frame["{}apex_touch_past{}".format(prefix, window)] = _one_sided_sum(credit, window, False)
+            frame["{}apex_touch_future{}".format(prefix, window)] = _one_sided_sum(credit, window, True)
 
 
 def _block_features(home: np.ndarray, away: np.ndarray, ball: np.ndarray, length: float,
@@ -151,6 +218,9 @@ def _block_features(home: np.ndarray, away: np.ndarray, ball: np.ndarray, length
     for name in ("home_speed", "away_speed", "ball_seen"):
         frame["{}_m{}".format(name, LONG_WINDOW)] = _centred_mean(frame[name].to_numpy(), LONG_WINDOW)
     _touch_features(frame, ball)
+    with np.errstate(invalid="ignore", divide="ignore"), warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        _apex_features(frame, home, away, ball)
     return frame
 
 
