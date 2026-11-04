@@ -18,6 +18,7 @@ truth is never used for any choice.
 import os
 import sys
 
+import joblib
 import numpy as np
 import pandas as pd
 from sklearn.ensemble import HistGradientBoostingClassifier
@@ -47,6 +48,7 @@ BALL_WINDOW = 37
 BALL_JITTER_CM = 1.5
 SEED = 0
 SWAP_LABEL = {"H": "A", "A": "H", "D": "D", "X": "X"}
+MODEL_PATH = os.path.join(HERE, "model", "cooked_model.joblib")  # trained on external data only
 
 
 def labelled_blocks(labels: np.ndarray) -> list:
@@ -162,14 +164,8 @@ def choose_temper(prepared: list) -> float:
     return best
 
 
-if __name__ == "__main__":
-    print("preparing external matches", flush=True)
-    prepared = prepare(training_matches())
-    print("\nleave-one-match-out spellF1 (ball degraded like the competition tracker)")
-    print("  {:<14} ".format("temper") + "  ".join("{:>6}".format(t) for t in TEMPERS))
-    temper = choose_temper(prepared)
-
-    model, prior, trans = train(prepared)
+def label_competition(model, prior: np.ndarray, trans: np.ndarray, temper: float) -> str:
+    """Label the competition match with a trained model; returns the submission's path."""
     meta_path, raw_path = require(["atd_meta", "atd_raw"])
     pitch = GAMES[GAME]["pitch"]
     track = features.parse_metrica_atd(raw_path, team_of_each_track(meta_path), pitch)
@@ -180,5 +176,19 @@ if __name__ == "__main__":
     frame = features.build(track, blocks, pitch)
     labels = decode(log_likelihoods(model, prior, frame), frame.index.to_numpy(), blocks,
                     n_frames, trans, temper)
-    path = write_submission(os.path.join(RESULTS_DIR, "hmm.csv"), labels)
-    print("wrote {}".format(path))
+    return write_submission(os.path.join(RESULTS_DIR, "hmm.csv"), labels)
+
+
+if __name__ == "__main__":
+    print("preparing external matches", flush=True)
+    prepared = prepare(training_matches())
+    print("\nleave-one-match-out spellF1 (ball degraded like the competition tracker)")
+    print("  {:<14} ".format("temper") + "  ".join("{:>6}".format(t) for t in TEMPERS))
+    temper = choose_temper(prepared)
+
+    model, prior, trans = train(prepared)
+    os.makedirs(os.path.dirname(MODEL_PATH), exist_ok=True)
+    joblib.dump({"model": model, "prior": prior, "trans": trans, "temper": temper}, MODEL_PATH,
+                compress=3)
+    print("saved {}".format(MODEL_PATH))
+    print("wrote {}".format(label_competition(model, prior, trans, temper)))

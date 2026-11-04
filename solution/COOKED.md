@@ -332,8 +332,10 @@ was not used for that choice and could not be, under the rules.
 
 ## 10. Reproduction
 
-See [README.md](README.md). In short: Python 3.13, `pip install -r solution/requirements.txt`,
-get the Metrica sample data and the IDSSE files, set `MTAH_DATA_DIR`, run
+See [README.md](README.md). Quickest: Python 3.13, `pip install -r solution/requirements.txt`,
+set `MTAH_DATA_DIR`, run `python solution/predict.py` (~3 min). It labels the match with the
+committed model (`solution/model/`, trained on external data only) and reproduces the submission
+byte for byte. To retrain: get the Metrica sample data and the IDSSE files, run
 `python solution/idsse_games.py` once (~30 s), then `python solution/run.py` (~45 min).
 `python solution/calibrate_ball.py` (~2 min) re-derives the ball smoothing settings. Two runs
 produce byte-identical files. A run from a fresh clone with a freshly built IDSSE cache and a
