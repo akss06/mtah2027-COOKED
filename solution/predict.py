@@ -12,5 +12,6 @@ import run
 
 if __name__ == "__main__":
     saved = joblib.load(run.MODEL_PATH)
-    print("wrote {}".format(run.label_competition(saved["model"], saved["prior"], saved["trans"],
-                                                  saved["temper"])))
+    print("wrote {}".format(run.label_competition((saved["model"], saved["prior"]),
+                                                  (saved["sg_model"], saved["sg_prior"]),
+                                                  saved["trans"], saved["temper"])))

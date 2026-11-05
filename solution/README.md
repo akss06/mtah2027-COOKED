@@ -17,7 +17,9 @@ Frame-level possession for BAR-ATH from the provided tactical tracking, in three
    ([calibrate_ball.py](calibrate_ball.py) sets how much, from aggregates of the competition
    input), and every match is used as is and with the ball hidden as often as the competition
    tracker loses it, each also with home and away swapped. Frames are weighted by 10 s ÷ the
-   length of their possession, because the metric counts every possession equally.
+   length of their possession, because the metric counts every possession equally. Two such
+   classifiers are trained, one on a moving-average ball and one on a Savitzky-Golay ball (the shape
+   the competition ball's statistics point to), and their log-probabilities are averaged 0.65 / 0.35.
 3. **Viterbi decoding** ([hmm.py](hmm.py)) — turns the per-frame probabilities into whole
    possessions, charging for every change of state at the rate possession changes in the training
    matches. The one free setting (how much to trust neighbouring frames) is chosen leave-one-match-out
@@ -43,8 +45,8 @@ python solution/predict.py           # ~3 min, writes evaluation/results/hmm.csv
 python evaluation/validate_submission.py evaluation/results/hmm.csv
 ```
 
-`solution/model/cooked_model.joblib` is the classifier, class prior, transition matrix and temper
-that `run.py` trained on the external matches below. `predict.py` reproduces the submission byte
+`solution/model/cooked_model.joblib` holds the two classifiers and their class priors, the
+transition matrix and the temper that `run.py` trained on the external matches below. `predict.py` reproduces the submission byte
 for byte.
 
 ### Retraining from scratch
@@ -68,7 +70,7 @@ Point the scripts at the data:
 
 ```bash
 python solution/idsse_games.py       # once, ~30 s: converts IDSSE to a 25 fps cache
-python solution/run.py               # ~45 min: trains, saves solution/model/, writes evaluation/results/hmm.csv
+python solution/run.py               # ~2 h 15 min: trains both classifiers, saves solution/model/, writes evaluation/results/hmm.csv
 python solution/calibrate_ball.py    # optional, ~2 min: re-derives the ball smoothing in run.py
 python evaluation/validate_submission.py evaluation/results/hmm.csv
 ```

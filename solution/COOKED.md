@@ -4,9 +4,11 @@
 
 ## 1. Approach in one paragraph
 
-For every frame we compute 139 features from the tracked player and ball positions, a
-gradient-boosted classifier turns them into P(home), P(away), P(dead), and a three-state Viterbi
-decoder turns those per-frame probabilities into whole possessions. The classifier is trained only
+For every frame we compute 139 features from the tracked player and ball positions, two
+gradient-boosted classifiers turn them into P(home), P(away), P(dead), and a three-state Viterbi
+decoder turns their pooled per-frame probabilities into whole possessions. The two classifiers
+differ only in how their training ball is blurred: one like a moving average, one like a
+Savitzky-Golay filter, the shape the competition ball's own statistics point to. They are trained only
 on **other matches**: the 7 matches of the IDSSE open dataset (official Bundesliga tracking with
 per-frame ball-status and possession flags) and Metrica Sports' two public sample games. Their
 ball is smoothed and hidden to look like the competition tracker's, and their frames are weighted
@@ -76,6 +78,15 @@ They best match three aggregates of the competition ball inside the halves: peak
 60 m/s² per minute (2.2 and 0.4) and the median acceleration (5.7 m/s²). No labels and no video
 are involved. The real tracker's filter is unknown; this only reproduces its statistics.
 
+**Its filter is probably not a moving average, though.** The shape of the competition ball's
+acceleration (its autocorrelation at 15, 25 and 35 frames, its curvature, and its average profile
+around sharp changes) has negative side-lobes that a moving average cannot produce at any width or
+jitter. A Savitzky-Golay filter (order 2, 47 frames) with ~2 mm of jitter matches all six of those
+statistics (section 7). So every training ball is
+also smoothed that way (Savitzky-Golay 47, order 2, 1.5 cm jitter, hidden the same way) to train the
+second classifier (section 6). Its order-4 cousins of 69–71 frames fit about as well; the statistics
+cannot separate them.
+
 **The competition ball is often missing.** The tracker loses it on 41% of graded frames, and on
 about 73% of the seconds before a tagged restart (again aggregates of the input data). Each
 smoothed match is therefore used twice: as is, and with the ball hidden in random 0.5–4 s gaps on
@@ -130,29 +141,32 @@ Using frames after the one being labelled is allowed: the task is post-match.
 
 - **Classifier:** scikit-learn `HistGradientBoostingClassifier` (600 iterations, 63 leaves per
   tree, learning rate 0.05, fixed seed), trained on every 5th frame — neighbours are
-  near-duplicates. The size was chosen leave-one-match-out (section 7).
+  near-duplicates. The size was chosen leave-one-match-out (section 7). Two are trained, identical
+  except for the training ball: the moving-average one and the Savitzky-Golay one (section 4).
 - **Weights:** each training frame is weighted by 10 s ÷ the length of the run (H, A or D) it
   belongs to, clipped to 0.1–10. spellF1 counts a 1 s possession like a 60 s one; unweighted, the
   classifier sees 60× fewer frames of it and learns to ignore it. The class prior is the weighted
   one.
-- **Emissions:** the classifier's P(state | features) divided by the class prior (a scaled
-  likelihood), then divided by a *temper* factor. Neighbouring frames are nearly copies of each
+- **Emissions:** each classifier's P(state | features) divided by its class prior (a scaled
+  likelihood). The two log-likelihoods are averaged, 0.65 for the moving-average classifier and 0.35
+  for the Savitzky-Golay one (section 7), then divided by a *temper* factor. Neighbouring frames are nearly copies of each
   other, so treating each as independent evidence overcounts it and makes the decoder flip on short
   runs.
 - **Transitions:** counted per frame from the training labels.
 - **Decoding:** Viterbi over H / A / D separately in each half; frames outside the halves are `X`.
 
-**The one free setting, temper, is chosen leave-one-match-out** over the 9 training matches: each
-match, with its ball smoothed and hidden as above, is scored by a model trained on the other 8.
-spellF1 is computed with the organisers' own `possession_metrics.py`:
+**Temper is chosen leave-one-match-out** over the 9 training matches: each match, with its ball
+smoothed by the moving average and hidden as above, is scored by both classifiers trained on the
+other 8. spellF1 is computed with the organisers' own `possession_metrics.py`:
 
 | temper | 1 | 2 | **3** | 4 | 8 | 16 |
 |---|---|---|---|---|---|---|
-| mean held-out spellF1 | 0.5930 | 0.6047 | **0.6050** | 0.5984 | 0.568 | 0.501 |
-| worst held-out match | 0.522 | 0.527 | **0.528** | 0.531 | 0.509 | 0.411 |
+| mean held-out spellF1 | 0.5868 | 0.5962 | **0.6006** | 0.5958 | 0.563 | 0.502 |
+| worst held-out match | 0.524 | 0.527 | **0.540** | 0.535 | 0.499 | 0.423 |
 
-Per held-out match at temper 3: IDSSE 0.528–0.664, Metrica 0.660 and 0.635. The final model is
-then trained on all 9 matches. These scores are lower than earlier versions in section 7 because
+Per held-out match at temper 3: IDSSE 0.540–0.640, Metrica 0.666 and 0.632. This held-out ball is
+the moving average, the blur the pool is weakest on: the moving-average classifier alone scores
+0.6050 here (section 7). The final classifiers are then trained on all 9 matches. These scores are lower than earlier versions in section 7 because
 the held-out ball is now smoothed like the competition's, a harder and more realistic test.
 
 ## 7. What we tried and dropped
@@ -386,9 +400,45 @@ An automatic diagnostic using Smart Tagging set-piece times showed that some goa
 throw-ins look exactly like live play in the tracking: the ball is visible and moving at ~4.5 m/s,
 and players run at ~2 m/s. The tracking alone cannot separate those.
 
+### Second classifier on a Savitzky-Golay ball (adopted)
+
+Section 4's shape statistics rule out a moving average for the competition ball and fit a
+Savitzky-Golay filter (order 2, ~47 frames); zero-phase Butterworth filters and the other
+shapes we tried fit worse. A classifier trained on a Savitzky-Golay 47 ball alone gains on every
+held-out ball with negative side-lobes and loses on every moving-average or Gaussian one, so
+it is pooled with the moving-average classifier instead of replacing it (log-likelihoods averaged
+with weight a on the new one; mean / worst match, matches better than the moving-average classifier
+alone, all at temper 3):
+
+| held-out ball | moving-average classifier | a = 0.35 (adopted) | a = 0.5 | a = 1 |
+|---|---|---|---|---|
+| Savitzky-Golay 51, order 2 (not trained on) | 0.6227 / 0.555 | **0.6451 / 0.587** (9 of 9) | 0.6521 / 0.603 | 0.6564 / 0.602 |
+| Savitzky-Golay 75, order 2 | 0.6096 | **0.6160** (7 of 9) | 0.6128 | 0.6028 |
+| two-sided exponential | 0.6263 | **0.6296** (6 of 9) | 0.6314 | 0.6229 |
+| 37-frame average (training blur) | 0.6050 / 0.528 | **0.6006 / 0.540** (3 of 9) | 0.5921 | 0.5653 |
+| 37-frame average + 5 cm noise | 0.6033 | **0.5936** (2 of 9) | 0.5885 | 0.5629 |
+| Gaussian, same spread | 0.6198 | **0.6131** (1 of 9) | 0.6068 | 0.5905 |
+| 50-frame / 75-frame average | 0.5743 / 0.5132 | **0.5605 / 0.4996** | 0.5504 / 0.4923 | 0.5196 / 0.4650 |
+
+Before this run we fixed a bar for adoption: at least +0.015 on Savitzky-Golay 51, and no more than
+0.005 lost on the training blur, noise, Gaussian, exponential and Savitzky-Golay 75 (0.010 on the
+wider averages). No weight passed it: a = 0.35 loses 0.010 with 5 cm noise and 0.014 on the wider
+averages. We adopted it anyway, as a deliberate bet on the measured shape: if the competition
+filter is Savitzky-Golay-like, the pool gains about +0.02; if it is a moving average after all, it
+costs up to ~0.01. The gentlest weight tried was chosen to keep that downside small. On BAR-ATH it
+changes 2.6% of graded frames' labels.
+
+Also tried in this round and dropped:
+- **A per-match de-blur strength** estimated from isolated one-player kicks. The estimate is biased
+  high by a factor that itself depends on the blur (1.1–2.5), so no fixed correction makes it safe.
+- **V-bounce contact features** (27 per-team columns marking where the ball's path bends sharply
+  near a player): they find more short spells (1–2 s spells found 23% → 27%) but are no better than
+  the existing turn credit at saying *which* team touched it (~30% right on the training blur), so
+  spellF1 did not move (0.6069 vs 0.6050 on the training blur, lower on most other blurs).
+
 ## 8. Result
 
-On BAR-ATH the submission reports 367 possessions with a median of 5.2 s (14% under 2 s), and
+On BAR-ATH the submission reports 385 possessions with a median of 5.3 s (12% under 2 s), and
 calls 44% of graded-half frames dead, within the 41–52% of the IDSSE matches.
 
 Pipeline check on the public 5 minutes (17 possessions — a sanity check, not a measurement; one
@@ -396,22 +446,23 @@ possession moves spellF1 by ~0.06):
 
 | | spellF1 | macroF1 | possessions (truth 17) |
 |---|---|---|---|
-| **ours** | **0.560** | **0.756** | 23 |
+| **ours** | **0.568** | **0.750** | 21 |
 | baseline_smooth125 | 0.424 | 0.581 | 16 |
 | baseline_smooth50 (the published floor's setting) | 0.326 | 0.621 | 26 |
 
 Earlier versions scored 0.710 (sharp training ball), 0.581 (smoothed ball, unweighted), 0.589
-(weighted, without kick direction) and 0.649 (with kick direction, without the de-blurred ball)
-on these 5 minutes. Each change was adopted on the leave-one-match-out evidence above, which covers about
+(weighted, without kick direction), 0.649 (with kick direction, without the de-blurred ball) and
+0.560 (one classifier, without the Savitzky-Golay pool) on these 5 minutes. Each change was adopted on the leave-one-match-out evidence above, which covers about
 3,900 possessions on 9 matches; this window was not used for any choice and could not be, under
 the rules.
 
 ## 9. Limitations
 
-- **Domain gap.** Neither training source uses the competition tracker. Its ball is imitated by a
-  moving average plus jitter matched on three statistics, and its ball loss by hiding the ball at
-  its overall rate; the real filter and where it loses the ball are unknown.
-- **Small training set.** 9 matches; the worst held-out match scores 0.53 against a mean of 0.61.
+- **Domain gap.** Neither training source uses the competition tracker. Its ball is imitated by two
+  blurs (a moving average matched on three statistics, and a Savitzky-Golay filter matching six
+  others), and its ball loss by hiding the ball at its overall rate; the real filter and where it
+  loses the ball are unknown. If the filter is a moving average after all, the pool costs ~0.01.
+- **Small training set.** 9 matches; the worst held-out match scores 0.54 against a mean of 0.60.
 - **Short possessions.** Most touches and deflections lasting under 2 s are still missed (about
   23% are found), and fixing all of them would be worth about +0.19 (section 7). On a ball smoothed
   over ~1.5 s, a touch this short barely leaves a trace. This also assumes IDSSE's possession flag switches on every touch,
@@ -429,7 +480,7 @@ See [README.md](README.md). Quickest: Python 3.13, `pip install -r solution/requ
 set `MTAH_DATA_DIR`, run `python solution/predict.py` (~3 min). It labels the match with the
 committed model (`solution/model/`, trained on external data only) and reproduces the submission
 byte for byte. To retrain: get the Metrica sample data and the IDSSE files, run
-`python solution/idsse_games.py` once (~30 s), then `python solution/run.py` (~45 min).
+`python solution/idsse_games.py` once (~30 s), then `python solution/run.py` (~2 h 15 min).
 `python solution/calibrate_ball.py` (~2 min) re-derives the ball smoothing settings. Two runs
 produce byte-identical files. A run from a fresh clone with a freshly built IDSSE cache and a
 different thread count (14 instead of 16) was also identical, checked on the previous version.

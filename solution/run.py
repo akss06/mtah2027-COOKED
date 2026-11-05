@@ -9,11 +9,15 @@
    like the competition tracker's; each is used as is and as a copy whose ball is hidden as often
    as the competition tracker loses it, and each with home and away swapped. Frames are weighted
    so every possession counts about equally, as it does in the metric.
+   Two such classifiers are trained: one on a ball smoothed by a 37-frame moving average, one on a
+   ball smoothed by a 47-frame Savitzky-Golay filter (the shape that best matches the competition
+   ball's statistics). Their log-probabilities are averaged, 0.65 / 0.35.
 3. The Viterbi judge (hmm.py) turns those per-frame probabilities into whole possessions.
 
-The one free knob, `temper`, is chosen leave-one-match-out over those 9 matches: each is scored by
-a model trained on the other 8. The final model is then trained on all 9. The competition ground
-truth is never used for any choice.
+`temper` is chosen leave-one-match-out over those 9 matches: each is scored by classifiers trained
+on the other 8. The final classifiers are then trained on all 9. The pool weight (0.35) was fixed on
+held-out external matches (COOKED.md section 7). The competition ground truth is never used
+for any choice.
 """
 
 import os
@@ -22,6 +26,7 @@ import sys
 import joblib
 import numpy as np
 import pandas as pd
+from scipy.signal import savgol_coeffs
 from sklearn.ensemble import HistGradientBoostingClassifier
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -47,6 +52,14 @@ DEAD_MISSING = 0.70
 # and noise floor best (calibrate_ball.py, from aggregates of its input data only).
 BALL_WINDOW = 37
 BALL_JITTER_CM = 1.5
+# The competition ball's acceleration autocorrelation and its profile around kicks (negative
+# side-lobes ~25 frames out) match a Savitzky-Golay filter (order 2, ~47 frames) and rule out a
+# moving average (COOKED.md section 4). A second classifier trained on that
+# ball is pooled with the first: on held-out matches it gains +0.022 on an SG 51 ball and loses at
+# most 0.014 on moving-average balls (COOKED.md section 7).
+SG_WINDOW = 47
+SG_ORDER = 2
+POOL_WEIGHT = 0.35  # weight of the Savitzky-Golay classifier's log-probabilities
 # spellF1 counts every possession once, however long. Unweighted, a 1 s possession gives the
 # classifier 25 frames and a 60 s one 1,500, so short possessions barely register. Weighting each
 # frame by 10 s / its run's length makes runs count about equally (clipped to 0.1-10).
@@ -80,6 +93,19 @@ def smooth_ball(ball: np.ndarray, window: int, jitter_cm: float, rng: np.random.
     return out
 
 
+def sg_ball(ball: np.ndarray, window: int, jitter_cm: float, rng: np.random.Generator) -> np.ndarray:
+    """Savitzky-Golay smoothing (order SG_ORDER) over visible frames, then Gaussian jitter. Its
+    weights go negative, so frames where the visible weight falls below half stay gaps."""
+    k = savgol_coeffs(window, SG_ORDER)
+    m = (~np.isnan(ball[:, 0])).astype(float)
+    den = np.convolve(m, k, mode="same")
+    with np.errstate(invalid="ignore", divide="ignore"):
+        out = np.stack([np.convolve(np.nan_to_num(ball[:, d]) * m, k, mode="same") / den
+                        for d in range(2)], 1)
+    out[(den < 0.5) | (m == 0)] = np.nan
+    return out + rng.normal(0, jitter_cm / 100, out.shape)
+
+
 def run_weights(labels: np.ndarray) -> np.ndarray:
     """Per-frame training weight: WEIGHT_SECONDS / length of the run (of any label) it sits in."""
     out = np.ones(len(labels))
@@ -95,7 +121,7 @@ def degrade(track: dict, labels: np.ndarray, rng: np.random.Generator) -> dict:
     return features.mask_ball(track, labels, DEAD_MISSING, rng, ("D",))
 
 
-def prepare(matches: list) -> list:
+def prepare(matches: list, smooth=smooth_ball, window: int = BALL_WINDOW) -> list:
     """Per match: training rows (ball smoothed like the competition tracker's, with and without
     the competition's ball gaps, both team orders) and held-out features.
 
@@ -105,7 +131,7 @@ def prepare(matches: list) -> list:
     prepared = []
     for i, (name, track, labels, pitch) in enumerate(matches):
         blocks = labelled_blocks(labels)
-        ball = smooth_ball(track["ball"], BALL_WINDOW, BALL_JITTER_CM, np.random.default_rng(SEED + 2000 + i))
+        ball = smooth(track["ball"], window, BALL_JITTER_CM, np.random.default_rng(SEED + 2000 + i))
         track = {**track, "ball": ball}
         degraded = degrade(track, labels, np.random.default_rng(SEED + i))
         held_out = features.build(degraded, blocks, pitch)
@@ -143,6 +169,11 @@ def log_likelihoods(model, prior: np.ndarray, frame) -> np.ndarray:
     return np.log(proba[:, order] + 1e-6) - np.log(prior)
 
 
+def pooled_log_likelihoods(box: tuple, sg: tuple, frame) -> np.ndarray:
+    """POOL_WEIGHT x SG classifier + the rest x moving-average classifier; each is (model, prior)."""
+    return POOL_WEIGHT * log_likelihoods(*sg, frame) + (1 - POOL_WEIGHT) * log_likelihoods(*box, frame)
+
+
 def decode(log_like: np.ndarray, index: np.ndarray, blocks: list, n_frames: int,
            trans: np.ndarray, temper: float) -> np.ndarray:
     """H/A/D inside each block, X everywhere else."""
@@ -157,12 +188,14 @@ def spell_f1(truth: np.ndarray, predicted: np.ndarray) -> float:
     return pm.evaluate(pm.label_codes(truth), pm.label_codes(predicted))["spell_f1_mean"]
 
 
-def choose_temper(prepared: list) -> float:
-    """Leave-one-match-out: each match scored by a model trained on all the others."""
+def choose_temper(prepared: list, prepared_sg: list) -> float:
+    """Leave-one-match-out: each match scored by both classifiers trained on all the others, on its
+    moving-average ball (the held-out ball every earlier choice was made on)."""
     scores = {t: [] for t in TEMPERS}
     for i, held in enumerate(prepared):
         model, prior, trans = train(prepared[:i] + prepared[i + 1:])
-        ll = log_likelihoods(model, prior, held["held_out"])
+        sg_model, sg_prior, _ = train(prepared_sg[:i] + prepared_sg[i + 1:])
+        ll = pooled_log_likelihoods((model, prior), (sg_model, sg_prior), held["held_out"])
         index = held["held_out"].index.to_numpy()
         row = []
         for temper in TEMPERS:
@@ -182,8 +215,8 @@ def choose_temper(prepared: list) -> float:
     return best
 
 
-def label_competition(model, prior: np.ndarray, trans: np.ndarray, temper: float) -> str:
-    """Label the competition match with a trained model; returns the submission's path."""
+def label_competition(box: tuple, sg: tuple, trans: np.ndarray, temper: float) -> str:
+    """Label the competition match with both trained (model, prior) pairs; returns the path."""
     meta_path, raw_path = require(["atd_meta", "atd_raw"])
     pitch = GAMES[GAME]["pitch"]
     track = features.parse_metrica_atd(raw_path, team_of_each_track(meta_path), pitch)
@@ -192,21 +225,26 @@ def label_competition(model, prior: np.ndarray, trans: np.ndarray, temper: float
 
     blocks = [(a, b) for _, a, b in half_video_blocks(GAME)]
     frame = features.build(track, blocks, pitch)
-    labels = decode(log_likelihoods(model, prior, frame), frame.index.to_numpy(), blocks,
+    labels = decode(pooled_log_likelihoods(box, sg, frame), frame.index.to_numpy(), blocks,
                     n_frames, trans, temper)
     return write_submission(os.path.join(RESULTS_DIR, "hmm.csv"), labels)
 
 
 if __name__ == "__main__":
     print("preparing external matches", flush=True)
-    prepared = prepare(training_matches())
+    matches = training_matches()
+    prepared = prepare(matches)
+    prepared_sg = prepare(matches, sg_ball, SG_WINDOW)
+    for p in prepared_sg:
+        del p["held_out"]  # both are scored on the moving-average ball; frees memory
     print("\nleave-one-match-out spellF1 (ball degraded like the competition tracker)")
     print("  {:<14} ".format("temper") + "  ".join("{:>6}".format(t) for t in TEMPERS))
-    temper = choose_temper(prepared)
+    temper = choose_temper(prepared, prepared_sg)
 
     model, prior, trans = train(prepared)
+    sg_model, sg_prior, _ = train(prepared_sg)
     os.makedirs(os.path.dirname(MODEL_PATH), exist_ok=True)
-    joblib.dump({"model": model, "prior": prior, "trans": trans, "temper": temper}, MODEL_PATH,
-                compress=3)
+    joblib.dump({"model": model, "prior": prior, "sg_model": sg_model, "sg_prior": sg_prior,
+                 "trans": trans, "temper": temper}, MODEL_PATH, compress=3)
     print("saved {}".format(MODEL_PATH))
-    print("wrote {}".format(label_competition(model, prior, trans, temper)))
+    print("wrote {}".format(label_competition((model, prior), (sg_model, sg_prior), trans, temper)))
