@@ -435,6 +435,9 @@ Also tried in this round and dropped:
   near a player): they find more short spells (1–2 s spells found 23% → 27%) but are no better than
   the existing turn credit at saying *which* team touched it (~30% right on the training blur), so
   spellF1 did not move (0.6069 vs 0.6050 on the training blur, lower on most other blurs).
+- **Metrica's third sample game as a 10th training match** (labelled by the same rule as games 1
+  and 2). On the original 9 held-out matches the pooled model changed by +0.0005 on average over
+  the ten held-out blurs (−0.004 on Savitzky-Golay 51), inside the noise; not kept.
 
 ## 8. Result
 
