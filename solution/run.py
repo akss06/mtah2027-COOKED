@@ -35,7 +35,7 @@ import sample_games  # noqa: E402
 from baseline import RESULTS_DIR, team_of_each_track, write_submission  # noqa: E402
 from games import GAME, GAMES, half_video_blocks, require  # noqa: E402
 
-TEMPERS = (1, 2, 4, 8, 16)
+TEMPERS = (1, 2, 3, 4, 8, 16)
 TRAIN_STEP = 5  # neighbouring frames are near-duplicates; every 5th is plenty to train on
 # The training matches track the ball almost always. The competition tracker loses it on 41% of
 # graded frames, and on ~73% of the seconds before a restart (both aggregates of its input data,

@@ -6,8 +6,9 @@ Frame-level possession for BAR-ATH from the provided tactical tracking, in three
    speed, team shape (how high and how spread out each team is, and which way it is moving), where
    the ball was last seen relative to the lines, and each team's distance to the ball when it was
    last and next seen, and ball touches (changes of the ball's velocity, credited to the nearest
-   team), and the direction of each kick from the ball's path before and after it, outside the
-   tracker's blur. Plus 1 s, 5 s and 10 s rolling means.
+   team), the direction of each kick from the ball's path before and after it, outside the
+   tracker's blur, and each team's distance to two gently de-blurred ball positions that cannot
+   over-correct for any plausible blur shape. Plus 1 s, 5 s and 10 s rolling means.
 2. **Classifier** — a gradient-boosted tree model gives P(H), P(A), P(D) per frame. It is trained
    **only on other matches**: the 7 matches of the IDSSE open dataset ([idsse_games.py](idsse_games.py)),
    labelled by the official per-frame ball-status and ball-possession flags in their tracking, and

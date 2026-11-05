@@ -4,7 +4,7 @@
 
 ## 1. Approach in one paragraph
 
-For every frame we compute 96 features from the tracked player and ball positions, a
+For every frame we compute 139 features from the tracked player and ball positions, a
 gradient-boosted classifier turns them into P(home), P(away), P(dead), and a three-state Viterbi
 decoder turns those per-frame probabilities into whole possessions. The classifier is trained only
 on **other matches**: the 7 matches of the IDSSE open dataset (official Bundesliga tracking with
@@ -111,6 +111,16 @@ oriented to attack +x, using the side its players stand on on average in that ha
   distance to that point, the push credited to it within 2.5 m (summed over the past and next 2 s
   and 5 s), that player's speed along the push, and whether it stands on the side the push came
   from. Available on ~45% of frames.
+- **De-blurred ball:** two sharpened ball positions, z = y − c·((y(t−Δ) + y(t+Δ))/2 − y), with
+  Δ = 11 frames, c = 0.90 and Δ = 19, c = 0.45. Such a correction moves a kick's blurred position
+  towards the true one whenever 0 < c < 2·c_kick, where c_kick depends on the blur. Over every blur
+  we considered plausible (moving averages of 37–75 frames, Gaussian, two-sided exponential,
+  Savitzky-Golay 51 / 75 of order 2 and 69 of order 4) c_kick is 0.78–11.6 at Δ = 11 and 0.31–3.9
+  at Δ = 19, so these two settings never overshoot. Per team and per position: its nearest
+  player's distance (now, carried back and forward across ball gaps, and its minimum over ±0.5 s),
+  and the 0.5 s turn of the ball credited to it within 3 m (summed over the past and next 2 s and
+  5 s). The turn is divided by its 90th percentile in each half, so a wider blur, which shrinks every
+  turn, does not shift its scale.
 - 1 s and 5 s centred rolling means of the speed, shape, velocity and ball-visibility features;
   10 s means of speed and ball visibility.
 
@@ -136,12 +146,12 @@ Using frames after the one being labelled is allowed: the task is post-match.
 match, with its ball smoothed and hidden as above, is scored by a model trained on the other 8.
 spellF1 is computed with the organisers' own `possession_metrics.py`:
 
-| temper | 1 | **2** | 4 | 8 | 16 |
-|---|---|---|---|---|---|
-| mean held-out spellF1 | 0.5761 | **0.5933** | 0.593 | 0.562 | 0.490 |
-| worst held-out match | 0.488 | **0.516** | 0.530 | 0.498 | 0.399 |
+| temper | 1 | 2 | **3** | 4 | 8 | 16 |
+|---|---|---|---|---|---|---|
+| mean held-out spellF1 | 0.5930 | 0.6047 | **0.6050** | 0.5984 | 0.568 | 0.501 |
+| worst held-out match | 0.522 | 0.527 | **0.528** | 0.531 | 0.509 | 0.411 |
 
-Per held-out match at temper 2: IDSSE 0.516–0.631, Metrica 0.646 and 0.625. The final model is
+Per held-out match at temper 3: IDSSE 0.528–0.664, Metrica 0.660 and 0.635. The final model is
 then trained on all 9 matches. These scores are lower than earlier versions in section 7 because
 the held-out ball is now smoothed like the competition's, a harder and more realistic test.
 
@@ -336,6 +346,34 @@ blurred differently from training (temper 2, gain over the weighted model):
 | two-sided exponential (Kalman-like), same spread | +0.013 | +0.013 | 9 of 9 |
 | + 5 / 10 / 20 cm noise | +0.011 / +0.016 / +0.010 | +0.012 / +0.028 / +0.007 | 8 of 9 each |
 
+**Also adopted: the de-blurred ball** (section 5), on top of kick direction. An automatic
+analysis of the competition ball's own aggregates (lag between ball and dribbler, autocorrelation
+and side-lobes of its acceleration) showed its filter is centred but shaped more like a
+Savitzky-Golay smoother of ~45–60 frames than our moving average. A sharper single correction
+(Δ = 19, c = 1.0, right for a 37-frame average) gained 0.031 on the training blur but lost on a
+Savitzky-Golay 51 ball and on wider averages, because it over-corrects there; it was dropped. The
+two milder corrections above were scored on every held-out blur (mean / worst match; kick
+direction at its temper 2, this at temper 3):
+
+| held-out ball | kick direction | + de-blurred ball | matches better |
+|---|---|---|---|
+| as calibrated (37-frame average, 1.5 cm) | 0.5933 / 0.516 | **0.6050 / 0.528** | 7 of 9 |
+| 50-frame / 75-frame average | 0.574 / 0.514, 0.514 / 0.441 | 0.574 / 0.518, 0.513 / 0.461 | 4 / 4 of 9 |
+| + 5 / 10 / 20 cm noise | 0.584 / 0.573 / 0.556 | 0.603 / 0.592 / 0.578 | 9 of 9 each |
+| Gaussian, same spread | 0.595 / 0.512 | 0.620 / 0.553 | 9 of 9 |
+| two-sided exponential, same spread | 0.596 / 0.509 | 0.626 / 0.558 | 9 of 9 |
+| Savitzky-Golay 51 / 75, order 2 | 0.605 / 0.541, 0.592 / 0.520 | 0.623 / 0.555, 0.610 / 0.547 | 9 / 9 of 9 |
+
+No held-out blur loses more than 0.001 on the mean, and the worst match improves on all of them.
+The gain does not come from short possessions (1–2 s spells found: 24% → 23%), so the de-blurred
+position mainly sharpens who has the ball around longer spells and where they start and end.
+Training on a mixture of three blurs instead (switching every 6 minutes between the 37-frame
+average and two Savitzky-Golay smoothers) scored well only on the blurs it was trained on and lost
+0.03 on the wider averages; not kept. Two decoder-side ideas tried alongside also did not help:
+lowering the cost of a team switch where the ball appears to be touched (0.5927 vs 0.5913, the gate
+fired on 30–40% of frames), and inserting a short spell of the other team at a sharp bend of the
+de-blurred ball inside a long possession (0.5924 vs 0.5933; most insertions were wrong).
+
 Tried at the same time and not kept: a decoder with a "short" and a "long" state per team, its
 durations fitted to the training runs (0.5749 vs 0.5745); the restart rule — after a throw-in,
 corner or goal kick the restarting team did not touch the ball last, so X → dead → X restarts
@@ -350,20 +388,21 @@ and players run at ~2 m/s. The tracking alone cannot separate those.
 
 ## 8. Result
 
-On BAR-ATH the submission reports 386 possessions with a median of 5.1 s (16% under 2 s), and
-calls 43% of graded-half frames dead, within the 41–52% of the IDSSE matches.
+On BAR-ATH the submission reports 367 possessions with a median of 5.2 s (14% under 2 s), and
+calls 44% of graded-half frames dead, within the 41–52% of the IDSSE matches.
 
 Pipeline check on the public 5 minutes (17 possessions — a sanity check, not a measurement; one
 possession moves spellF1 by ~0.06):
 
 | | spellF1 | macroF1 | possessions (truth 17) |
 |---|---|---|---|
-| **ours** | **0.649** | **0.759** | 20 |
+| **ours** | **0.560** | **0.756** | 23 |
 | baseline_smooth125 | 0.424 | 0.581 | 16 |
 | baseline_smooth50 (the published floor's setting) | 0.326 | 0.621 | 26 |
 
-Earlier versions scored 0.710 (sharp training ball), 0.581 (smoothed ball, unweighted) and 0.589
-(weighted, without kick direction) on these 5 minutes. Each change was adopted on the leave-one-match-out evidence above, which covers about
+Earlier versions scored 0.710 (sharp training ball), 0.581 (smoothed ball, unweighted), 0.589
+(weighted, without kick direction) and 0.649 (with kick direction, without the de-blurred ball)
+on these 5 minutes. Each change was adopted on the leave-one-match-out evidence above, which covers about
 3,900 possessions on 9 matches; this window was not used for any choice and could not be, under
 the rules.
 
@@ -372,9 +411,9 @@ the rules.
 - **Domain gap.** Neither training source uses the competition tracker. Its ball is imitated by a
   moving average plus jitter matched on three statistics, and its ball loss by hiding the ball at
   its overall rate; the real filter and where it loses the ball are unknown.
-- **Small training set.** 9 matches; the worst held-out match scores 0.52 against a mean of 0.59.
+- **Small training set.** 9 matches; the worst held-out match scores 0.53 against a mean of 0.61.
 - **Short possessions.** Most touches and deflections lasting under 2 s are still missed (about
-  24% are found), and fixing all of them would be worth about +0.19 (section 7). On a ball smoothed
+  23% are found), and fixing all of them would be worth about +0.19 (section 7). On a ball smoothed
   over ~1.5 s, a touch this short barely leaves a trace. This also assumes IDSSE's possession flag switches on every touch,
   as the competition ground truth does; we could not check it against video.
 - **Short stoppages and short bursts.** Quick throw-ins and goal kicks whose tracking looks like

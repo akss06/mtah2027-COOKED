@@ -16,6 +16,8 @@ What each group of features is for:
   * kick direction    -- the ball's path 0.8-1.6 s before and after each frame, outside the blur
                          of a touch at that frame: where the two meet, how hard and which way the
                          ball was pushed, and whether each team's nearest player fits that push
+  * de-blurred ball   -- two gently sharpened ball positions that are safe for any blur shape
+                         seen: each team's distance to them and the ball's turn credited to it
 Short and long rolling means of each give the classifier context around the frame.
 """
 
@@ -37,6 +39,12 @@ TURN = 12  # frames: the ball's velocity over the past vs the next ~0.5 s
 APEX_NEAR, APEX_FAR = 20, 40  # frames
 APEX_MIN_SEEN = 6  # visible ball frames needed in each window
 APEX_REACH = 2.5  # m
+# De-blur z = y - c ((y(t-D) + y(t+D)) / 2 - y) sharpens a kick iff 0 < c < 2 c_kick(kernel).
+# Over boxcar 37-75, Gaussian, two-sided exponential and Savitzky-Golay 51 / 75 / 69 blurs,
+# c_kick(19) is 0.31-3.9 and c_kick(11) 0.78-11.6, so these two never overshoot.
+GENTLE = ((11, 0.90, "pn"), (19, 0.45, "pw"))  # (D frames, c, column tag)
+GENTLE_REACH = 3.0  # m: a partly de-blurred corner still gets credit
+GENTLE_MIN = 12  # frames: rolling-min window on each side
 
 
 def parse_metrica_atd(raw_path: str, team_of_track: np.ndarray, pitch: tuple) -> dict:
@@ -157,6 +165,39 @@ def _apex_features(frame: pd.DataFrame, home: np.ndarray, away: np.ndarray, ball
             frame["{}apex_touch_future{}".format(prefix, window)] = _one_sided_sum(credit, window, True)
 
 
+def _gentle_features(frame: pd.DataFrame, home: np.ndarray, away: np.ndarray, ball: np.ndarray) -> None:
+    """Two kernel-safe de-blurred ball positions (see GENTLE). Per team: nearest player's distance
+    to each, held across ball gaps and as a rolling minimum either side, and the turn credited to
+    it within GENTLE_REACH, summed over the past and next 2 s and 5 s."""
+    n = len(ball)
+    turn = frame["ball_turn"].to_numpy()
+    moving = turn > 0
+    # Per-block 90th percentile: a wider blur shrinks every turn by the same factor.
+    p90 = np.percentile(turn[moving], 90) if moving.sum() > 100 else 0.0
+    turn = turn / p90 if p90 > 0 else turn
+    frame["ball_turn_norm"] = turn
+    for d, c, tag in GENTLE:
+        z = np.full_like(ball, np.nan)
+        if n > 2 * d:
+            mid = ball[d:-d]
+            z[d:-d] = mid - c * ((ball[:-2 * d] + ball[2 * d:]) / 2 - mid)
+        seen = ~np.isnan(z[:, 0])
+        frame[tag + "_seen"] = seen.astype(float)
+        for prefix, players in (("home_", home), ("away_", away)):
+            dist = np.nanmin(np.linalg.norm(players - z[:, None, :], axis=2), axis=1)
+            s = pd.Series(np.where(seen, dist, np.nan))
+            frame[prefix + tag + "_dist"] = dist
+            frame[prefix + tag + "_dist_last"] = s.ffill().to_numpy()
+            frame[prefix + tag + "_dist_next"] = s.bfill().to_numpy()
+            frame[prefix + tag + "_min_past"] = s.rolling(GENTLE_MIN + 1, min_periods=1).min().to_numpy()
+            frame[prefix + tag + "_min_future"] = s[::-1].rolling(GENTLE_MIN + 1, min_periods=1).min().to_numpy()[::-1]
+            credit = np.nan_to_num(turn * np.clip(1 - dist / GENTLE_REACH, 0, 1))
+            frame[prefix + tag + "_turn"] = credit
+            for window in (PAST_FUTURE, WINDOWS[1]):
+                frame["{}{}_turn_past{}".format(prefix, tag, window)] = _one_sided_sum(credit, window, False)
+                frame["{}{}_turn_future{}".format(prefix, tag, window)] = _one_sided_sum(credit, window, True)
+
+
 def _block_features(home: np.ndarray, away: np.ndarray, ball: np.ndarray, length: float,
                     width: float) -> pd.DataFrame:
     # Empty frames (no players, no ball) are expected and come out as NaN; silence numpy about it.
@@ -221,6 +262,7 @@ def _block_features(home: np.ndarray, away: np.ndarray, ball: np.ndarray, length
     with np.errstate(invalid="ignore", divide="ignore"), warnings.catch_warnings():
         warnings.simplefilter("ignore", RuntimeWarning)
         _apex_features(frame, home, away, ball)
+        _gentle_features(frame, home, away, ball)
     return frame
 
 
