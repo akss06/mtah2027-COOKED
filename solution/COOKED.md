@@ -51,7 +51,7 @@ how well a model does on **matches and trackers it has not seen** (sections 6 an
 | dataset | source | licence | who labelled it | amount |
 |---|---|---|---|---|
 | IDSSE open data: 7 matches, Bundesliga / 2. Bundesliga 2022/23 | Bassek, M. et al. (2025). *An integrated dataset of spatiotemporal and event data in elite soccer.* Scientific Data 12, 195. <https://doi.org/10.1038/s41597-025-04505-y> (data owner DFL; tracking by Sportec Solutions) | CC BY 4.0 | DFL's official `BallStatus` and `BallPossession` flags in the position data | 7 matches, ~1.02 million frames at 25 fps |
-| Metrica Sports sample games 1 and 2 | <https://github.com/metrica-sports/sample-data> | public sample data | Metrica's event data; per-frame labels derived by our code | 2 matches, ~286,000 frames |
+| Metrica Sports sample games 1 and 2 | <https://github.com/metrica-sports/sample-data> | no formal licence; Metrica's README asks users to use it responsibly and acknowledge the source | Metrica's event data; per-frame labels derived by our code | 2 matches, ~286,000 frames |
 
 No data about the competition match other than the provided bundle is used. No human decided any
 per-frame label.
@@ -68,6 +68,12 @@ per-frame label.
   loose ball stays with the last team that had it. Dead frames run from the end of the last event
   before a restart to the restart itself.
 
+**Possession rules.** We write no possession rules of our own for the competition match: the
+classifiers learn the conventions of these training labels, so loose balls, challenges and restarts
+are handled as a blend of the two sources. On IDSSE the data provider's flags decide all three; we
+neither define nor can check how they treat a contested ball, beyond seeing that the owner can
+change on a single touch. On Metrica the rules are the ones above.
+
 ### Matching the competition tracker
 
 **The competition ball is smooth.** Per minute of visible ball, the training balls show 15–100×
@@ -75,8 +81,8 @@ more sharp velocity changes than the competition ball, the kind a touch produces
 training ball is first replaced by a centred moving average over 37 frames (~1.5 s) plus 1.5 cm
 of Gaussian jitter. [calibrate_ball.py](calibrate_ball.py) chooses those two numbers on a grid.
 They best match three aggregates of the competition ball inside the halves: peaks over 30 and over
-60 m/s² per minute (2.2 and 0.4) and the median acceleration (5.7 m/s²). No labels and no video
-are involved. The real tracker's filter is unknown; this only reproduces its statistics.
+60 m/s² per minute (2.2 and 0.4) and the median acceleration (5.7 m/s²). No competition labels and no video
+are involved (the external matches' own labels only place their simulated ball gaps). The real tracker's filter is unknown; this only reproduces its statistics.
 
 **Its filter is probably not a moving average, though.** The shape of the competition ball's
 acceleration (its autocorrelation at 15, 25 and 35 frames, its curvature, and its average profile
@@ -100,7 +106,8 @@ home and away swapped, so the model cannot learn a team bias.
 Per frame, computed per half so no feature crosses halftime ([features.py](features.py)). The one
 exception is in training only: the training ball is smoothed before it is split, so the ~20 frames
 either side of halftime (under 0.07% of graded frames) mix the two halves. Each team is
-oriented to attack +x, using the side its players stand on on average in that half.
+oriented to attack +x: the home team's average side in that half sets its direction, and the away
+team gets the opposite.
 
 - **Ball vs players:** each team's nearest distance to the ball and its difference; players within
   5 m of the ball.
@@ -132,7 +139,7 @@ oriented to attack +x, using the side its players stand on on average in that ha
   we considered plausible (moving averages of 37–75 frames, Gaussian, two-sided exponential,
   Savitzky-Golay 51 / 75 of order 2 and 69 of order 4) c_kick is 0.78–11.6 at Δ = 11 and 0.31–3.9
   at Δ = 19, so these two settings never overshoot. Per team and per position: its nearest
-  player's distance (now, carried back and forward across ball gaps, and its minimum over ±0.5 s),
+  player's distance (now, carried back and forward across ball gaps, and its minimum over the past and over the next 0.5 s),
   and the 0.5 s turn of the ball credited to it within 3 m (summed over the past and next 2 s and
   5 s). The turn is divided by its 90th percentile in each half, so a wider blur, which shrinks every
   turn, does not shift its scale.
@@ -442,6 +449,10 @@ Also tried in this round and dropped:
 - **Metrica's third sample game as a 10th training match** (labelled by the same rule as games 1
   and 2). On the original 9 held-out matches the pooled model changed by +0.0005 on average over
   the ten held-out blurs (−0.004 on Savitzky-Golay 51), inside the noise; not kept.
+- **Two decoder changes, no retraining.** Averaging the two classifiers' probabilities instead of
+  their log-probabilities (best mean change over the ten blurs +0.001), and choosing per match among
+  nine pool settings (even using the true labels, at most +0.003 over the best fixed setting on
+  Savitzky-Golay 51). Neither kept.
 
 ## 8. Result
 
@@ -481,6 +492,17 @@ the rules.
 - **Metrica's labels are event-derived**, an approximation of the corrected-tracking definition.
 - **No player identities** are used; everything is team-level, as the ATD provides.
 
+**What we would fix with more time:**
+- **A sharper ball.** Short possessions are the largest known gap, and they need more than this
+  ball shows. We would train a ball detector on other matches' video, instead of the pretrained
+  one we tried and dropped (section 7).
+- **Training data from the same tracker.** Other matches from the competition's automatic tracker
+  with corrected labels would remove the need to imitate its blur and ball loss.
+- **Realistic ball loss.** We hide the ball in random gaps; we would model where a tracker really
+  loses it, such as in crowds and on fast passes.
+- **Stoppage boundaries.** Quick restarts that look like live play need a signal beyond tracking,
+  such as the automatic tags or the video.
+
 ## 10. Reproduction
 
 See [README.md](README.md). Quickest: Python 3.13, `pip install -r solution/requirements.txt`,
@@ -488,6 +510,6 @@ set `MTAH_DATA_DIR`, run `python solution/predict.py` (~3 min). It labels the ma
 committed model (`solution/model/`, trained on external data only) and reproduces the submission
 byte for byte. To retrain: get the Metrica sample data and the IDSSE files, run
 `python solution/idsse_games.py` once (~30 s), then `python solution/run.py` (~2 h 15 min).
-`python solution/calibrate_ball.py` (~2 min) re-derives the ball smoothing settings. Two runs
+`python solution/calibrate_ball.py` (~2 min) re-derives the moving-average width and jitter (the Savitzky-Golay window and order are fixed in `run.py`). Two runs
 produce byte-identical files. A run from a fresh clone with a freshly built IDSSE cache and a
 different thread count (14 instead of 16) was also identical, checked on the previous version.
