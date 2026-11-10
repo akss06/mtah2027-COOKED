@@ -37,14 +37,15 @@ import hmm  # noqa: E402
 import idsse_games  # noqa: E402
 import possession_metrics as pm  # noqa: E402
 import sample_games  # noqa: E402
-from baseline import RESULTS_DIR, team_of_each_track, write_submission  # noqa: E402
+from baseline import RESULTS_DIR, team_of_each_track  # noqa: E402
 from games import GAME, GAMES, half_video_blocks, require  # noqa: E402
 
 TEMPERS = (1, 2, 3, 4, 8, 16)
 TRAIN_STEP = 5  # neighbouring frames are near-duplicates; every 5th is plenty to train on
 # The training matches track the ball almost always. The competition tracker loses it on 41% of
 # graded frames, and on ~73% of the seconds before a restart (both aggregates of its input data,
-# not of any labels). Hiding it on 25% of live and 70% of dead frames matches that overall rate.
+# not of any labels). We aim to hide it on 25% of live and 70% of dead frames; gaps can spill across
+# a change of state, so the real rates on the training matches are 28% and 76%, 47% overall.
 ALIVE_MISSING = 0.25
 DEAD_MISSING = 0.70
 # The competition tracker's ball is smooth: 15-100x fewer sharp velocity changes per minute than
@@ -215,6 +216,16 @@ def choose_temper(prepared: list, prepared_sg: list) -> float:
     return best
 
 
+def write_csv(path: str, labels: np.ndarray) -> str:
+    """A frame,label CSV. Always LF: the default newline depends on the OS, and the organisers must
+    be able to regenerate this exact file on any machine."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", newline="\n") as handle:
+        handle.write("frame,label\n")
+        handle.writelines("{},{}\n".format(frame, label) for frame, label in enumerate(labels))
+    return path
+
+
 def label_competition(box: tuple, sg: tuple, trans: np.ndarray, temper: float) -> str:
     """Label the competition match with both trained (model, prior) pairs; returns the path."""
     meta_path, raw_path = require(["atd_meta", "atd_raw"])
@@ -227,7 +238,7 @@ def label_competition(box: tuple, sg: tuple, trans: np.ndarray, temper: float) -
     frame = features.build(track, blocks, pitch)
     labels = decode(pooled_log_likelihoods(box, sg, frame), frame.index.to_numpy(), blocks,
                     n_frames, trans, temper)
-    return write_submission(os.path.join(RESULTS_DIR, "hmm.csv"), labels)
+    return write_csv(os.path.join(RESULTS_DIR, "hmm.csv"), labels)
 
 
 if __name__ == "__main__":

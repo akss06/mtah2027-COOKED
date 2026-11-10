@@ -35,6 +35,7 @@ Python 3.13.
 ```bash
 python -m venv .venv
 .venv/Scripts/python -m pip install -r solution/requirements.txt   # .venv/bin/python on macOS/Linux
+source .venv/Scripts/activate   # .venv/bin/activate on macOS/Linux; every command below needs it
 ```
 
 ### From the committed model (no training, no external data)

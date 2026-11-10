@@ -89,13 +89,17 @@ cannot separate them.
 
 **The competition ball is often missing.** The tracker loses it on 41% of graded frames, and on
 about 73% of the seconds before a tagged restart (again aggregates of the input data). Each
-smoothed match is therefore used twice: as is, and with the ball hidden in random 0.5–4 s gaps on
-25% of live and 70% of dead frames, which matches that overall rate. Every copy is also used with
+smoothed match is therefore used twice: as is, and with the ball hidden in random 0.5–4 s gaps. We
+aim for 25% of live and 70% of dead frames; a gap can spill across a change of state, so the real
+rates on the training matches average 28% and 76%, or 47% of graded frames against the
+competition's 41%. Every copy is also used with
 home and away swapped, so the model cannot learn a team bias.
 
 ## 5. Features
 
-Per frame, computed per half so nothing crosses halftime ([features.py](features.py)). Each team is
+Per frame, computed per half so no feature crosses halftime ([features.py](features.py)). The one
+exception is in training only: the training ball is smoothed before it is split, so the ~20 frames
+either side of halftime (under 0.07% of graded frames) mix the two halves. Each team is
 oriented to attack +x, using the side its players stand on on average in that half.
 
 - **Ball vs players:** each team's nearest distance to the ball and its difference; players within
@@ -463,7 +467,7 @@ the rules.
 
 - **Domain gap.** Neither training source uses the competition tracker. Its ball is imitated by two
   blurs (a moving average matched on three statistics, and a Savitzky-Golay filter matching six
-  others), and its ball loss by hiding the ball at its overall rate; the real filter and where it
+  others), and its ball loss by hiding the ball at roughly its overall rate; the real filter and where it
   loses the ball are unknown. If the filter is a moving average after all, the pool costs ~0.01.
 - **Small training set.** 9 matches; the worst held-out match scores 0.54 against a mean of 0.60.
 - **Short possessions.** Most touches and deflections lasting under 2 s are still missed (about
